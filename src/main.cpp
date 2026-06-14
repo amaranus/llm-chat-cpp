@@ -1,0 +1,619 @@
+#include <iostream>
+#include <string>
+#include <vector>
+#include <memory>
+#include <sstream>
+#include <thread>
+#include <mutex>
+#include <atomic>
+#include <csignal>
+#include <functional>
+#include <stdexcept>
+#include <cstring>
+#include <chrono>
+#include <algorithm>
+#include <iomanip>
+#include <cstdlib>
+#include <nlohmann/json.hpp>
+#include <curl/curl.h>
+#include <readline/readline.h>
+#include <readline/history.h>
+
+using json = nlohmann::json;
+
+static std::atomic<bool> g_running{true};
+static std::mutex g_print_mutex;
+
+static void signal_handler(int) {
+    g_running = false;
+}
+
+namespace {
+
+std::string color(const std::string& text, int code) {
+    return "\033[" + std::to_string(code) + "m" + text + "\033[0m";
+}
+
+std::string bold(const std::string& text) {
+    return "\033[1m" + text + "\033[0m";
+}
+
+std::string trim(const std::string& s) {
+    size_t start = s.find_first_not_of(" \t\r\n");
+    if (start == std::string::npos) return "";
+    size_t end = s.find_last_not_of(" \t\r\n");
+    return s.substr(start, end - start + 1);
+}
+
+// ============================================================
+// HTTP Client (libcurl wrapper)
+// ============================================================
+class HttpClient {
+public:
+    HttpClient() {
+        curl_global_init(CURL_GLOBAL_ALL);
+    }
+
+    ~HttpClient() {
+        curl_global_cleanup();
+    }
+
+    struct Result {
+        json body;
+        std::vector<std::string> response_headers;
+        long http_code;
+    };
+
+    Result post(const std::string& url, const json& body,
+                long timeout_ms = 30000,
+                const std::vector<std::string>& extra_headers = {}) const {
+        std::string body_str = body.dump();
+        std::string response_body;
+        std::vector<std::string> resp_headers;
+        long http_code = 0;
+
+        auto* curl = curl_easy_init();
+        if (!curl) {
+            throw std::runtime_error("curl_easy_init failed");
+        }
+
+        struct curl_slist* headers = nullptr;
+        headers = curl_slist_append(headers, "Content-Type: application/json");
+        headers = curl_slist_append(headers, "Accept: application/json");
+        for (const auto& h : extra_headers) {
+            headers = curl_slist_append(headers, h.c_str());
+        }
+
+        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body_str.c_str());
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(body_str.size()));
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_body);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_body);
+        curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, write_header);
+        curl_easy_setopt(curl, CURLOPT_HEADERDATA, &resp_headers);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, timeout_ms);
+        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, 5000);
+
+        CURLcode res = curl_easy_perform(curl);
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+        curl_easy_cleanup(curl);
+        curl_slist_free_all(headers);
+
+        if (res != CURLE_OK) {
+            throw std::runtime_error(
+                "HTTP request failed: " + std::string(curl_easy_strerror(res)));
+        }
+
+        if (http_code < 200 || http_code >= 300) {
+            throw std::runtime_error(
+                "HTTP error " + std::to_string(http_code) + ": " + response_body);
+        }
+
+        return {json::parse(response_body), resp_headers, http_code};
+    }
+
+private:
+    static size_t write_body(void* contents, size_t size, size_t nmemb, std::string* s) {
+        size_t total = size * nmemb;
+        s->append(static_cast<char*>(contents), total);
+        return total;
+    }
+
+    static size_t write_header(void* contents, size_t size, size_t nmemb,
+                               std::vector<std::string>* headers) {
+        size_t total = size * nmemb;
+        std::string header(static_cast<char*>(contents), total);
+        if (!header.empty() && header != "\r\n" && header != "\n") {
+            headers->push_back(header);
+        }
+        return total;
+    }
+};
+
+// ============================================================
+// MCP Client (streamable-http transport with session support)
+// ============================================================
+struct MCPTool {
+    std::string name;
+    std::string description;
+    json input_schema;
+};
+
+class MCPClient {
+public:
+    MCPClient(std::string base_url, const HttpClient& http)
+        : base_url_(std::move(base_url)), http_(http) {}
+
+    json send_request(const json& req) {
+        std::vector<std::string> extra_headers;
+        if (!session_id_.empty()) {
+            extra_headers.push_back("Mcp-Session-Id: " + session_id_);
+        }
+
+        auto result = http_.post(base_url_, req, 30000, extra_headers);
+
+        if (session_id_.empty()) {
+            for (const auto& h : result.response_headers) {
+                std::string lower_h = h;
+                std::transform(lower_h.begin(), lower_h.end(), lower_h.begin(), ::tolower);
+                if (lower_h.find("mcp-session-id:") == 0) {
+                    session_id_ = trim(h.substr(std::string("mcp-session-id:").length()));
+                    break;
+                }
+            }
+        }
+
+        return result.body;
+    }
+
+    json initialize() {
+        json req = {
+            {"jsonrpc", "2.0"},
+            {"id", next_id_++},
+            {"method", "initialize"},
+            {"params", {
+                {"protocolVersion", "2024-11-05"},
+                {"capabilities", json::object()},
+                {"clientInfo", {{"name", "llm-chat"}, {"version", "1.0.0"}}}
+            }}
+        };
+        return send_request(req);
+    }
+
+    std::vector<MCPTool> list_tools() {
+        json req = {
+            {"jsonrpc", "2.0"},
+            {"id", next_id_++},
+            {"method", "tools/list"},
+            {"params", json::object()}
+        };
+        auto resp = send_request(req);
+
+        if (resp.contains("error")) {
+            throw std::runtime_error(
+                "MCP error " + resp["error"]["code"].dump() + ": "
+                + resp["error"].value("message", "unknown"));
+        }
+
+        if (!resp.contains("result") || !resp["result"].contains("tools")) {
+            return {};
+        }
+
+        std::vector<MCPTool> tools;
+        for (const auto& t : resp["result"]["tools"]) {
+            MCPTool tool;
+            tool.name = t.value("name", "");
+            tool.description = t.value("description", "");
+            tool.input_schema = t.value("inputSchema", json::object());
+            tools.push_back(std::move(tool));
+        }
+        return tools;
+    }
+
+    json call_tool(const std::string& name, const json& arguments) {
+        json req = {
+            {"jsonrpc", "2.0"},
+            {"id", next_id_++},
+            {"method", "tools/call"},
+            {"params", {
+                {"name", name},
+                {"arguments", arguments}
+            }}
+        };
+        auto resp = send_request(req);
+
+        if (resp.contains("error")) {
+            throw std::runtime_error(
+                "MCP tool error " + resp["error"]["code"].dump() + ": "
+                + resp["error"].value("message", "unknown"));
+        }
+
+        return resp;
+    }
+
+    const std::string& session_id() const { return session_id_; }
+
+private:
+    std::string base_url_;
+    const HttpClient& http_;
+    std::string session_id_;
+    int next_id_ = 1;
+};
+
+// ============================================================
+// LLM Client (OpenAI-compatible)
+// ============================================================
+class LLMClient {
+public:
+    LLMClient(std::string base_url, const HttpClient& http)
+        : chat_url_(base_url + "/v1/chat/completions"), http_(http) {}
+
+    struct Usage {
+        int prompt_tokens = 0;
+        int completion_tokens = 0;
+        int total_tokens = 0;
+    };
+
+    struct ChatResult {
+        json message;
+        std::string content;
+        std::vector<json> tool_calls;
+        std::string finish_reason;
+        Usage usage;
+        int duration_ms = 0;
+    };
+
+    ChatResult chat(const json& messages, const json& tools = json(),
+                    const std::string& model = "default") {
+        json body = {
+            {"model", model},
+            {"messages", messages},
+            {"stream", false}
+        };
+
+        if (!tools.empty()) {
+            body["tools"] = tools;
+            body["tool_choice"] = "auto";
+        }
+
+        auto start = std::chrono::steady_clock::now();
+        auto result = http_.post(chat_url_, body, 120000, {});
+        auto end = std::chrono::steady_clock::now();
+
+        auto& resp = result.body;
+
+        auto& choice = resp["choices"][0];
+        auto& msg = choice["message"];
+
+        ChatResult cr;
+        cr.message = msg;
+        cr.content = msg.value("content", "");
+        cr.finish_reason = choice.value("finish_reason", "");
+        cr.duration_ms = static_cast<int>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count());
+
+        if (resp.contains("usage")) {
+            auto& u = resp["usage"];
+            cr.usage.prompt_tokens = u.value("prompt_tokens", 0);
+            cr.usage.completion_tokens = u.value("completion_tokens", 0);
+            cr.usage.total_tokens = u.value("total_tokens", 0);
+        }
+
+        if (msg.contains("tool_calls") && !msg["tool_calls"].is_null()) {
+            for (const auto& tc : msg["tool_calls"]) {
+                cr.tool_calls.push_back(tc);
+            }
+        }
+
+        return cr;
+    }
+
+private:
+    std::string chat_url_;
+    const HttpClient& http_;
+};
+
+// ============================================================
+// Chat Application
+// ============================================================
+class ChatApp {
+public:
+    ChatApp(std::string llm_url, std::string mcp_url, int max_context = 8192)
+        : llm_url_(std::move(llm_url)), mcp_url_(std::move(mcp_url)), max_context_(max_context) {}
+
+    void run() {
+        signal(SIGINT, signal_handler);
+        signal(SIGTERM, signal_handler);
+
+        print_logo();
+        std::cout << "\n";
+
+        HttpClient http;
+        MCPClient mcp(mcp_url_, http);
+        LLMClient llm(llm_url_, http);
+
+        // MCP sunucusuna bağlan
+        std::cout << "MCP sunucusuna bağlanılıyor: " << mcp_url_ << " ... ";
+        std::cout.flush();
+        try {
+            auto init_resp = mcp.initialize();
+            std::string sid = mcp.session_id();
+            std::cout << color("başarılı", 32);
+            if (!sid.empty()) {
+                std::cout << " (session: " << sid.substr(0, 16) << "...)";
+            }
+            std::cout << "\n";
+        } catch (const std::exception& e) {
+            std::cout << color("başarısız", 31) << " (" << e.what() << ")\n";
+        }
+
+        // MCP araçlarını listele
+        std::vector<MCPTool> tools;
+        try {
+            tools = mcp.list_tools();
+            std::cout << "MCP araçları (" << tools.size() << " adet): ";
+            for (size_t i = 0; i < tools.size(); ++i) {
+                if (i > 0) std::cout << ", ";
+                std::cout << color(tools[i].name, 36);
+            }
+            std::cout << "\n";
+        } catch (const std::exception& e) {
+            std::cout << color("Araç listesi alınamadı: ", 33) << e.what() << "\n";
+        }
+
+        std::cout << "────────────────────────────────────────\n";
+        print_help();
+        std::cout << "\n";
+
+        json messages = json::array();
+        json openai_tools = json::array();
+
+        for (const auto& t : tools) {
+            json ot = {
+                {"type", "function"},
+                {"function", {
+                    {"name", t.name},
+                    {"description", t.description},
+                    {"parameters", t.input_schema}
+                }}
+            };
+            openai_tools.push_back(std::move(ot));
+        }
+
+        while (g_running) {
+            char* line = readline(color(bold(">> "), 32).c_str());
+            if (!line) {
+                std::cout << "\n";
+                break;
+            }
+
+            std::string input(line);
+            std::free(line);
+
+            if (input.empty()) continue;
+            add_history(input.c_str());
+
+            if (input == "/quit" || input == "/exit") {
+                std::cout << "Görüşmek üzere.\n";
+                break;
+            }
+            if (input == "/help") {
+                print_help();
+                continue;
+            }
+            if (input == "/clear") {
+                messages = json::array();
+                std::cout << "Sohbet geçmişi temizlendi.\n";
+                continue;
+            }
+            if (input == "/tools") {
+                std::cout << "MCP araçları (" << tools.size() << " adet): ";
+                for (size_t i = 0; i < tools.size(); ++i) {
+                    if (i > 0) std::cout << ", ";
+                    std::cout << color(tools[i].name, 36);
+                }
+                std::cout << "\n";
+                continue;
+            }
+
+            json user_msg = {
+                {"role", "user"},
+                {"content", input}
+            };
+            messages.push_back(user_msg);
+
+            bool tool_loop = true;
+            int tool_call_count = 0;
+            const int max_tool_calls = 20;
+
+            while (tool_loop && g_running && tool_call_count < max_tool_calls) {
+                try {
+                    auto result = llm.chat(messages, openai_tools);
+
+                    if (result.content.empty() && result.tool_calls.empty()) {
+                        std::cout << color("[Model boş yanıt döndü]", 33) << "\n";
+                        break;
+                    }
+
+                    if (!result.content.empty()) {
+                        std::cout << color(bold("Yanıt: "), 36) << result.content << "\n\n";
+                    }
+
+                    print_stats(result);
+
+                    if (result.finish_reason == "tool_calls" && !result.tool_calls.empty()) {
+                        for (const auto& tc : result.tool_calls) {
+                            tool_call_count++;
+
+                            auto& func = tc["function"];
+                            std::string tool_name = func["name"];
+                            json tool_args = json::parse(func["arguments"].get<std::string>());
+                            std::string tool_call_id = tc["id"];
+
+                            std::cout << color("  ⚡ Araç çağrısı: ", 33)
+                                      << color(bold(tool_name), 33) << "(";
+                            bool first = true;
+                            for (auto& [key, val] : tool_args.items()) {
+                                if (!first) std::cout << ", ";
+                                std::cout << key << "=" << val.dump();
+                                first = false;
+                            }
+                            std::cout << ")\n";
+                            std::cout.flush();
+
+                            json mcp_result;
+                            try {
+                                mcp_result = mcp.call_tool(tool_name, tool_args);
+                            } catch (const std::exception& e) {
+                                mcp_result = {
+                                    {"result", {
+                                        {"content", json::array({{{"type", "text"}, {"text", std::string("Hata: ") + e.what()}}})}
+                                    }}
+                                };
+                            }
+
+                            std::string tool_result_str;
+                            if (mcp_result.contains("result") &&
+                                mcp_result["result"].contains("content")) {
+                                for (const auto& c : mcp_result["result"]["content"]) {
+                                    if (c.value("type", "") == "text") {
+                                        if (!tool_result_str.empty()) tool_result_str += "\n";
+                                        tool_result_str += c.value("text", "");
+                                    }
+                                }
+                            } else {
+                                tool_result_str = mcp_result.dump(2);
+                            }
+
+                            if (tool_result_str.length() > 500) {
+                                tool_result_str = tool_result_str.substr(0, 500)
+                                    + "\n... [sonuç " + std::to_string(tool_result_str.length())
+                                    + " karakter, kesildi]";
+                            }
+
+                            std::cout << color("  ← Sonuç: ", 32)
+                                      << tool_result_str << "\n\n";
+                            std::cout.flush();
+
+                            json tool_msg = {
+                                {"role", "tool"},
+                                {"content", tool_result_str},
+                                {"tool_call_id", tool_call_id}
+                            };
+                            messages.push_back(tool_msg);
+                        }
+
+                        json assistant_msg = result.message;
+                        if (assistant_msg.contains("content") && assistant_msg["content"].is_null()) {
+                            assistant_msg["content"] = "";
+                        }
+                        if (!result.tool_calls.empty()) {
+                            assistant_msg["tool_calls"] = result.tool_calls;
+                        }
+                        messages.push_back(assistant_msg);
+                    } else {
+                        json assistant_msg = {
+                            {"role", "assistant"},
+                            {"content", result.content}
+                        };
+                        messages.push_back(assistant_msg);
+                        tool_loop = false;
+                    }
+
+                } catch (const std::exception& e) {
+                    std::cout << color(bold("HATA: "), 31) << e.what() << "\n";
+                    break;
+                }
+            }
+
+            if (tool_call_count >= max_tool_calls) {
+                std::cout << color("Maksimum araç çağrısı sayısına ulaşıldı.", 33) << "\n";
+            }
+        }
+    }
+
+private:
+    void print_logo() {
+        std::cout << R"(░██         ░██         ░███     ░███           ░██████  ░██                      ░██    )" "\n";
+        std::cout << R"(░██         ░██         ░████   ░████          ░██   ░██ ░██                      ░██    )" "\n";
+        std::cout << R"(░██         ░██         ░██░██ ░██░██         ░██        ░████████   ░██████   ░████████ )" "\n";
+        std::cout << R"(░██         ░██         ░██ ░████ ░██ ░██████ ░██        ░██    ░██       ░██     ░██    )" "\n";
+        std::cout << R"(░██         ░██         ░██  ░██  ░██         ░██        ░██    ░██  ░███████     ░██    )" "\n";
+        std::cout << R"(░██         ░██         ░██       ░██          ░██   ░██ ░██    ░██ ░██   ░██     ░██    )" "\n";
+        std::cout << R"(░██████████ ░██████████ ░██       ░██           ░██████  ░██    ░██  ░█████░██     ░████ )" "\n";
+    }
+
+    void print_stats(const LLMClient::ChatResult& r) {
+        std::cout << color("┈ ", 90);
+        if (r.usage.completion_tokens > 0) {
+            int total = r.usage.total_tokens > 0 ? r.usage.total_tokens : r.usage.completion_tokens;
+            std::cout << r.usage.prompt_tokens << "→" << r.usage.completion_tokens
+                      << " tokens, ";
+            double ts = r.duration_ms > 0
+                ? (r.usage.completion_tokens * 1000.0 / r.duration_ms) : 0.0;
+            std::cout << std::fixed << std::setprecision(1) << ts << " t/s, ";
+            if (max_context_ > 0) {
+                std::cout << "%" << (total * 100 / max_context_)
+                          << " context (" << total << "/" << max_context_ << "), ";
+            }
+        }
+        std::cout << r.duration_ms << "ms\n";
+    }
+
+    void print_help() {
+        std::cout << "Komutlar:\n";
+        std::cout << "  " << color("/quit", 33) << " veya " << color("/exit", 33) << " — Çıkış\n";
+        std::cout << "  " << color("/help", 33) << " — Bu yardımı göster\n";
+        std::cout << "  " << color("/clear", 33) << " — Sohbet geçmişini temizle\n";
+        std::cout << "  " << color("/tools", 33) << " — MCP araçlarını listele\n";
+    }
+
+    std::string llm_url_;
+    std::string mcp_url_;
+    int max_context_;
+};
+
+} // anonymous namespace
+
+static std::string env_or(const char* key, const std::string& fallback) {
+    const char* val = std::getenv(key);
+    return val ? std::string(val) : fallback;
+}
+
+static int env_int(const char* key, int fallback) {
+    const char* val = std::getenv(key);
+    if (!val) return fallback;
+    try { return std::stoi(val); } catch (...) { return fallback; }
+}
+
+int main(int argc, char* argv[]) {
+    std::string llm_url = env_or("LLM_CHAT_LLM_URL", "http://localhost:8080");
+    std::string mcp_url = env_or("LLM_CHAT_MCP_URL", "http://localhost:8000/mcp");
+    int max_context = env_int("LLM_CHAT_MAX_CONTEXT", 8192);
+
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--llm-url" && i + 1 < argc) {
+            llm_url = argv[++i];
+        } else if (arg == "--mcp-url" && i + 1 < argc) {
+            mcp_url = argv[++i];
+        } else if (arg == "--help" || arg == "-h") {
+            std::cout << "Kullanım: llm-chat [--llm-url URL] [--mcp-url URL]\n";
+            std::cout << "  LLM_CHAT_LLM_URL (" << llm_url << ")\n";
+            std::cout << "  LLM_CHAT_MCP_URL (" << mcp_url << ")\n";
+            std::cout << "  LLM_CHAT_MAX_CONTEXT (" << max_context << ")\n";
+            return 0;
+        }
+    }
+
+    try {
+        ChatApp app(llm_url, mcp_url, max_context);
+        app.run();
+    } catch (const std::exception& e) {
+        std::cerr << color(bold("KRİTIK HATA: "), 31) << e.what() << "\n";
+        return 1;
+    }
+
+    return 0;
+}
