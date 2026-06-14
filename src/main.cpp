@@ -695,9 +695,27 @@ public:
                     std::string full_content;
                     bool first_token = true;
 
+                    std::atomic<bool> thinking_done{false};
+                    std::thread thinking_thread([&]() {
+                        const char spinner[] = "|/-\\";
+                        int i = 0;
+                        while (!thinking_done) {
+                            {
+                                std::lock_guard<std::mutex> lock(g_print_mutex);
+                                std::cout << "\r" << color(std::string(" ") + spinner[i % 4] + " Thinking...", 90) << std::flush;
+                            }
+                            std::this_thread::sleep_for(std::chrono::milliseconds(80));
+                            i++;
+                        }
+                    });
+
                     auto result = llm.chat_stream(messages,
                         [&](const std::string& token) {
                             if (first_token) {
+                                thinking_done = true;
+                                thinking_thread.join();
+                                std::lock_guard<std::mutex> lock(g_print_mutex);
+                                std::cout << "\r" << std::string(get_terminal_width(), ' ') << "\r";
                                 std::cout << color(std::string(get_terminal_width(), '-'), 90) << "\n";
                                 std::cout << color(bold("Response: "), 36);
                                 std::cout.flush();
@@ -707,6 +725,13 @@ public:
                             full_content += token;
                         },
                         openai_tools);
+
+                    if (first_token) {
+                        thinking_done = true;
+                        if (thinking_thread.joinable()) thinking_thread.join();
+                        std::lock_guard<std::mutex> lock(g_print_mutex);
+                        std::cout << "\r" << std::string(get_terminal_width(), ' ') << "\r" << std::flush;
+                    }
 
                     if (!first_token) {
                         std::cout << "\n";
