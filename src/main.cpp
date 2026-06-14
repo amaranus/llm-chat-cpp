@@ -14,6 +14,8 @@
 #include <algorithm>
 #include <iomanip>
 #include <cstdlib>
+#include <sys/ioctl.h>
+#include <unistd.h>
 #include <nlohmann/json.hpp>
 #include <curl/curl.h>
 #include <readline/readline.h>
@@ -260,6 +262,7 @@ public:
         std::string content;
         std::vector<json> tool_calls;
         std::string finish_reason;
+        std::string model_name;
         Usage usage;
         int duration_ms = 0;
     };
@@ -290,6 +293,7 @@ public:
         cr.message = msg;
         cr.content = msg.value("content", "");
         cr.finish_reason = choice.value("finish_reason", "");
+        cr.model_name = resp.value("model", "");
         cr.duration_ms = static_cast<int>(
             std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count());
 
@@ -313,6 +317,16 @@ private:
     std::string chat_url_;
     const HttpClient& http_;
 };
+
+int get_terminal_width() {
+    struct winsize w;
+
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &w) == 0) {
+        return w.ws_col;
+    }
+
+    return 80; // fallback
+}
 
 // ============================================================
 // Chat Application
@@ -362,7 +376,7 @@ public:
             std::cout << color("Araç listesi alınamadı: ", 33) << e.what() << "\n";
         }
 
-        std::cout << "────────────────────────────────────────\n";
+        std::cout << color(std::string(get_terminal_width(), '-'), 90) << "\n";
         print_help();
         std::cout << "\n";
 
@@ -437,10 +451,10 @@ public:
                     }
 
                     if (!result.content.empty()) {
-                        std::cout << color("──────────────────────────────────────────────────", 90) << "\n";
+                        std::cout << color(std::string(get_terminal_width(), '-'), 90) << "\n";
                         std::cout << color(bold("Yanıt: "), 36) << result.content << "\n";
+                        std::cout << color(std::string(get_terminal_width(), '-'), 90) << "\n";
                         print_stats(result);
-                        std::cout << color("──────────────────────────────────────────────────", 90) << "\n\n";
                     } else {
                         print_stats(result);
                     }
@@ -548,20 +562,42 @@ private:
     }
 
     void print_stats(const LLMClient::ChatResult& r) {
-        std::cout << color("┈ ", 90);
+        std::ostringstream line;
+        line << color(" ─ ", 90);
         if (r.usage.completion_tokens > 0) {
             int total = r.usage.total_tokens > 0 ? r.usage.total_tokens : r.usage.completion_tokens;
-            std::cout << r.usage.prompt_tokens << "→" << r.usage.completion_tokens
-                      << " tokens, ";
+            line << r.usage.prompt_tokens << " → " << r.usage.completion_tokens
+                 << " tokens - ";
             double ts = r.duration_ms > 0
                 ? (r.usage.completion_tokens * 1000.0 / r.duration_ms) : 0.0;
-            std::cout << std::fixed << std::setprecision(1) << ts << " t/s, ";
+            line << std::fixed << std::setprecision(1) << ts << " t/s - ";
             if (max_context_ > 0) {
-                std::cout << "%" << (total * 100 / max_context_)
-                          << " context (" << total << "/" << max_context_ << "), ";
+                line << "%" << (total * 100 / max_context_)
+                     << " context (" << total << "/" << max_context_ << ") - ";
             }
         }
-        std::cout << r.duration_ms << "ms\n";
+        line << r.duration_ms << "ms" << " - ";
+
+        if (!r.model_name.empty()) {
+            struct winsize ws;
+            int cols = 80;
+            if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) != -1) {
+                cols = ws.ws_col;
+            }
+            std::string raw = line.str();
+            size_t visible = 0;
+            bool in_escape = false;
+            for (char c : raw) {
+                if (c == '\033') { in_escape = true; continue; }
+                if (in_escape) { if (c == 'm') in_escape = false; continue; }
+                visible++;
+            }
+            int pad = (cols > visible + 2) ? cols - visible - r.model_name.size() - 1 : 2;
+            for (int i = 0; i < pad; ++i) line << " ";
+            line << r.model_name;
+        }
+
+        std::cout << line.str() << "\n";
     }
 
     void print_help() {
@@ -570,6 +606,7 @@ private:
         std::cout << "  " << color("/help", 33) << " — Bu yardımı göster\n";
         std::cout << "  " << color("/clear", 33) << " — Sohbet geçmişini temizle\n";
         std::cout << "  " << color("/tools", 33) << " — MCP araçlarını listele\n";
+        std::cout << color(std::string(get_terminal_width(), '-'), 90) << "\n";
     }
 
     std::string llm_url_;
