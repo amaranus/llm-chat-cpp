@@ -1,14 +1,14 @@
-# llm-chat — MCP Destekli Terminal Sohbeti
+# llm-chat — MCP-Powered Terminal Chat
 
-llama.cpp ve MCP sunucusuna bağlanarak terminal üzerinden sohbet etmenizi sağlayan C++ uygulaması.
+A C++ terminal chat application that connects to llama.cpp and an MCP server for tool-assisted conversations.
 
-## Gereksinimler
+## Requirements
 
-- C++17 derleyici (g++ ≥ 9, clang ≥ 10)
+- C++17 compiler (g++ ≥ 9, clang ≥ 10)
 - CMake ≥ 3.16
-- libcurl (geliştirme kütüphanesi)
-- GNU Readline (geliştirme kütüphanesi)
-- nlohmann/json (geliştirme kütüphanesi)
+- libcurl (development headers)
+- GNU Readline (development headers)
+- nlohmann/json (development headers)
 
 ### Ubuntu/Debian
 
@@ -28,45 +28,43 @@ sudo pacman -S base-devel cmake curl readline nlohmann-json
 sudo dnf install gcc-c++ cmake libcurl-devel readline-devel nlohmann-json-devel
 ```
 
-## Derleme
+## Build
 
 ```bash
-# Proje kök dizininde
 cmake -B build
 cmake --build build
 ```
 
-Derlenen binary: `build/llm-chat`
+Binary: `build/llm-chat`
 
-## Kullanım
+## Usage
 
-### 1. llama.cpp sunucusunu başlat
+### 1. Start llama.cpp
 
 ```bash
-# llama.cpp server (OpenAI-compatible API)
 llama-server -m <model.gguf> --port 8080
 ```
 
-### 2. MCP sunucusunu başlat
+### 2. Start MCP server
 
 ```bash
-# Mevcut MCP sunucusu (server.py)
+# example with server.py
 uv run server.py
 ```
 
-### 3. llm-chat'i çalıştır
+### 3. Run llm-chat
 
 ```bash
 ./build/llm-chat
 ```
 
-## Ortam Değişkenleri
+## Environment Variables
 
-| Değişken | Varsayılan | Açıklama |
+| Variable | Default | Description |
 |---|---|---|
-| `LLM_CHAT_LLM_URL` | `http://localhost:8080` | llama.cpp sunucu adresi |
-| `LLM_CHAT_MCP_URL` | `http://localhost:8000/mcp` | MCP sunucu adresi |
-| `LLM_CHAT_MAX_CONTEXT` | `8192` | Model max context token sayısı (yüzdelik hesaplama için) |
+| `LLM_CHAT_LLM_URL` | `http://localhost:8080` | llama.cpp server address |
+| `LLM_CHAT_MCP_URL` | `http://localhost:8000/mcp` | MCP server address |
+| `LLM_CHAT_MAX_CONTEXT` | `8192` | Max context token count (for percentage display) |
 
 ```bash
 export LLM_CHAT_LLM_URL="http://10.0.0.1:8080"
@@ -75,16 +73,18 @@ export LLM_CHAT_MAX_CONTEXT=4096
 ./build/llm-chat
 ```
 
-## Sohbet Komutları
+> **Note:** If the llama.cpp server provides `n_ctx` (or `max_context_length`) in the `/v1/models` endpoint, it overrides `LLM_CHAT_MAX_CONTEXT`.
 
-| Komut | Açıklama |
+## Commands
+
+| Command | Description |
 |---|---|
-| `/quit` veya `/exit` | Çıkış |
-| `/help` | Komut listesini göster |
-| `/clear` | Sohbet geçmişini temizle |
-| `/tools` | MCP araçlarını listele |
+| `/quit` or `/exit` | Exit |
+| `/help` | Show command list |
+| `/clear` | Clear chat history |
+| `/tools` | List MCP tools |
 
-## Mimarisi
+## Architecture
 
 ```
 ┌─────────────┐      ┌──────────────┐      ┌──────────────┐
@@ -97,8 +97,8 @@ export LLM_CHAT_MAX_CONTEXT=4096
 └─────────────┘
 ```
 
-1. Kullanıcı mesajı → llama.cpp API (tool tanımlarıyla)
-2. Model `tool_calls` dönerse → MCP üzerinden araç çalıştırılır
-3. Araç sonucu modele geri gönderilir
-4. Model nihai yanıtı döndüğünde kullanıcıya gösterilir
-5. Her yanıt sonunda token sayısı, süre ve context yüzdesi gösterilir
+1. User message → llama.cpp API (with tool definitions)
+2. If model returns `tool_calls` → execute via MCP
+3. Tool result sent back to model
+4. Model final response displayed to user
+5. Stats shown after each response (tokens, time, t/s, context %)

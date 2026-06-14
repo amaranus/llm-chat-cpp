@@ -399,7 +399,7 @@ public:
         MCPClient mcp(mcp_url_, http);
         LLMClient llm(llm_url_, http);
 
-        // Model bilgisini sunucudan al (max context dahil)
+        // Fetch model info from server (including max context)
         {
             auto info = llm.fetch_model_info();
             if (info.max_context > 0) {
@@ -409,33 +409,33 @@ public:
             }
         }
 
-        // MCP sunucusuna bağlan
-        std::cout << "MCP sunucusuna bağlanılıyor: " << mcp_url_ << " ... ";
+        // Connect to MCP server
+        std::cout << "Connecting to MCP: " << mcp_url_ << " ... ";
         std::cout.flush();
         try {
             auto init_resp = mcp.initialize();
             std::string sid = mcp.session_id();
-            std::cout << color("başarılı", 32);
+            std::cout << color("ok", 32);
             if (!sid.empty()) {
                 std::cout << " (session: " << sid.substr(0, 16) << "...)";
             }
             std::cout << "\n";
         } catch (const std::exception& e) {
-            std::cout << color("başarısız", 31) << " (" << e.what() << ")\n";
+            std::cout << color("failed", 31) << " (" << e.what() << ")\n";
         }
 
-        // MCP araçlarını listele
+        // List MCP tools
         std::vector<MCPTool> tools;
         try {
             tools = mcp.list_tools();
-            std::cout << "MCP araçları (" << tools.size() << " adet): ";
+            std::cout << "MCP tools (" << tools.size() << "): ";
             for (size_t i = 0; i < tools.size(); ++i) {
                 if (i > 0) std::cout << ", ";
                 std::cout << color(tools[i].name, 36);
             }
             std::cout << "\n";
         } catch (const std::exception& e) {
-            std::cout << color("Araç listesi alınamadı: ", 33) << e.what() << "\n";
+            std::cout << color("Failed to list tools: ", 33) << e.what() << "\n";
         }
 
         std::cout << color(std::string(get_terminal_width(), '-'), 90) << "\n";
@@ -471,7 +471,7 @@ public:
             add_history(input.c_str());
 
             if (input == "/quit" || input == "/exit") {
-                std::cout << "Görüşmek üzere.\n";
+                std::cout << "Bye.\n";
                 break;
             }
             if (input == "/help") {
@@ -480,11 +480,11 @@ public:
             }
             if (input == "/clear") {
                 messages = json::array();
-                std::cout << "Sohbet geçmişi temizlendi.\n";
+                std::cout << "Chat history cleared.\n";
                 continue;
             }
             if (input == "/tools") {
-                std::cout << "MCP araçları (" << tools.size() << " adet): ";
+                std::cout << "MCP tools (" << tools.size() << "): ";
                 for (size_t i = 0; i < tools.size(); ++i) {
                     if (i > 0) std::cout << ", ";
                     std::cout << color(tools[i].name, 36);
@@ -508,13 +508,13 @@ public:
                     auto result = llm.chat(messages, openai_tools);
 
                     if (result.content.empty() && result.tool_calls.empty()) {
-                        std::cout << color("[Model boş yanıt döndü]", 33) << "\n";
+                        std::cout << color("[Model returned empty response]", 33) << "\n";
                         break;
                     }
 
                     if (!result.content.empty()) {
                         std::cout << color(std::string(get_terminal_width(), '-'), 90) << "\n";
-                        std::cout << color(bold("Yanıt: "), 36) << result.content << "\n";
+                        std::cout << color(bold("Response: "), 36) << result.content << "\n";
                         std::cout << color(std::string(get_terminal_width(), '-'), 90) << "\n";
                         print_stats(result);
                     } else {
@@ -530,7 +530,7 @@ public:
                             json tool_args = json::parse(func["arguments"].get<std::string>());
                             std::string tool_call_id = tc["id"];
 
-                            std::cout << color("  ⚡ Araç çağrısı: ", 33)
+                            std::cout << color("  ⚡ Tool call: ", 33)
                                       << color(bold(tool_name), 33) << "(";
                             bool first = true;
                             for (auto& [key, val] : tool_args.items()) {
@@ -547,7 +547,7 @@ public:
                             } catch (const std::exception& e) {
                                 mcp_result = {
                                     {"result", {
-                                        {"content", json::array({{{"type", "text"}, {"text", std::string("Hata: ") + e.what()}}})}
+                                        {"content", json::array({{{"type", "text"}, {"text", std::string("Error: ") + e.what()}}})}
                                     }}
                                 };
                             }
@@ -567,11 +567,11 @@ public:
 
                             if (tool_result_str.length() > 500) {
                                 tool_result_str = tool_result_str.substr(0, 500)
-                                    + "\n... [sonuç " + std::to_string(tool_result_str.length())
-                                    + " karakter, kesildi]";
+                                    + "\n... [result " + std::to_string(tool_result_str.length())
+                                    + " chars, truncated]";
                             }
 
-                            std::cout << color("  ← Sonuç: ", 32)
+                            std::cout << color("  ← Result: ", 32)
                                       << tool_result_str << "\n\n";
                             std::cout.flush();
 
@@ -601,26 +601,24 @@ public:
                     }
 
                 } catch (const std::exception& e) {
-                    std::cout << color(bold("HATA: "), 31) << e.what() << "\n";
+                    std::cout << color(bold("ERROR: "), 31) << e.what() << "\n";
                     break;
                 }
             }
 
             if (tool_call_count >= max_tool_calls) {
-                std::cout << color("Maksimum araç çağrısı sayısına ulaşıldı.", 33) << "\n";
+                std::cout << color("Maximum tool call count reached.", 33) << "\n";
             }
         }
     }
 
 private:
     void print_logo() {
-        std::cout << R"(░██         ░██         ░███     ░███           ░██████  ░██                      ░██    )" "\n";
-        std::cout << R"(░██         ░██         ░████   ░████          ░██   ░██ ░██                      ░██    )" "\n";
-        std::cout << R"(░██         ░██         ░██░██ ░██░██         ░██        ░████████   ░██████   ░████████ )" "\n";
-        std::cout << R"(░██         ░██         ░██ ░████ ░██ ░██████ ░██        ░██    ░██       ░██     ░██    )" "\n";
-        std::cout << R"(░██         ░██         ░██  ░██  ░██         ░██        ░██    ░██  ░███████     ░██    )" "\n";
-        std::cout << R"(░██         ░██         ░██       ░██          ░██   ░██ ░██    ░██ ░██   ░██     ░██    )" "\n";
-        std::cout << R"(░██████████ ░██████████ ░██       ░██           ░██████  ░██    ░██  ░█████░██     ░████ )" "\n";
+        std::cout << R"(██      ██      ███    ███        ██████ ██   ██  █████  ████████  )" "\n";
+        std::cout << R"(██      ██      ████  ████       ██      ██   ██ ██   ██    ██     )" "\n";
+        std::cout << R"(██      ██      ██ ████ ██ █████ ██      ███████ ███████    ██     )" "\n";
+        std::cout << R"(██      ██      ██  ██  ██       ██      ██   ██ ██   ██    ██     )" "\n";
+        std::cout << R"(███████ ███████ ██      ██        ██████ ██   ██ ██   ██    ██     )" "\n";
     }
 
     void print_stats(const LLMClient::ChatResult& r) {
@@ -660,11 +658,11 @@ private:
     }
 
     void print_help() {
-        std::cout << "Komutlar:\n";
-        std::cout << "  " << color("/quit", 33) << " veya " << color("/exit", 33) << " — Çıkış\n";
-        std::cout << "  " << color("/help", 33) << " — Bu yardımı göster\n";
-        std::cout << "  " << color("/clear", 33) << " — Sohbet geçmişini temizle\n";
-        std::cout << "  " << color("/tools", 33) << " — MCP araçlarını listele\n";
+        std::cout << "Commands:\n";
+        std::cout << "  " << color("/quit", 33) << " or " << color("/exit", 33) << " — Exit\n";
+        std::cout << "  " << color("/help", 33) << " — Show this help\n";
+        std::cout << "  " << color("/clear", 33) << " — Clear chat history\n";
+        std::cout << "  " << color("/tools", 33) << " — List MCP tools\n";
         std::cout << color(std::string(get_terminal_width(), '-'), 90) << "\n";
     }
 
@@ -698,7 +696,7 @@ int main(int argc, char* argv[]) {
         } else if (arg == "--mcp-url" && i + 1 < argc) {
             mcp_url = argv[++i];
         } else if (arg == "--help" || arg == "-h") {
-            std::cout << "Kullanım: llm-chat [--llm-url URL] [--mcp-url URL]\n";
+            std::cout << "Usage: llm-chat [--llm-url URL] [--mcp-url URL]\n";
             std::cout << "  LLM_CHAT_LLM_URL (" << llm_url << ")\n";
             std::cout << "  LLM_CHAT_MCP_URL (" << mcp_url << ")\n";
             std::cout << "  LLM_CHAT_MAX_CONTEXT (" << max_context << ")\n";
@@ -710,7 +708,7 @@ int main(int argc, char* argv[]) {
         ChatApp app(llm_url, mcp_url, max_context);
         app.run();
     } catch (const std::exception& e) {
-        std::cerr << color(bold("KRİTIK HATA: "), 31) << e.what() << "\n";
+        std::cerr << color(bold("CRITICAL ERROR: "), 31) << e.what() << "\n";
         return 1;
     }
 
