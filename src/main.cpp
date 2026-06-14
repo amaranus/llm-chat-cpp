@@ -40,6 +40,23 @@ std::string bold(const std::string& text) {
     return "\033[1m" + text + "\033[0m";
 }
 
+std::string rl_prompt(const std::string& text) {
+    std::string result;
+    bool in_escape = false;
+    for (char c : text) {
+        if (c == '\033') {
+            result += "\001";
+            in_escape = true;
+        }
+        result += c;
+        if (in_escape && c == 'm') {
+            result += "\002";
+            in_escape = false;
+        }
+    }
+    return result;
+}
+
 std::string trim(const std::string& s) {
     size_t start = s.find_first_not_of(" \t\r\n");
     if (start == std::string::npos) return "";
@@ -115,6 +132,45 @@ public:
         return {json::parse(response_body), resp_headers, http_code};
     }
 
+    using StreamCallback = std::function<void(const std::string& chunk)>;
+
+    void post_stream(const std::string& url, const json& body,
+                     StreamCallback on_chunk,
+                     long timeout_ms = 120000,
+                     const std::vector<std::string>& extra_headers = {}) const {
+        std::string body_str = body.dump();
+
+        auto* curl = curl_easy_init();
+        if (!curl) {
+            throw std::runtime_error("curl_easy_init failed");
+        }
+
+        struct curl_slist* headers = nullptr;
+        headers = curl_slist_append(headers, "Content-Type: application/json");
+        headers = curl_slist_append(headers, "Accept: text/event-stream");
+        for (const auto& h : extra_headers) {
+            headers = curl_slist_append(headers, h.c_str());
+        }
+
+        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body_str.c_str());
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(body_str.size()));
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_body_stream);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &on_chunk);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, timeout_ms);
+        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, 5000);
+
+        CURLcode res = curl_easy_perform(curl);
+        curl_slist_free_all(headers);
+        curl_easy_cleanup(curl);
+
+        if (res != CURLE_OK) {
+            throw std::runtime_error(
+                "HTTP stream request failed: " + std::string(curl_easy_strerror(res)));
+        }
+    }
+
     json get(const std::string& url, long timeout_ms = 10000) const {
         std::string response_body;
         auto* curl = curl_easy_init();
@@ -154,6 +210,14 @@ private:
         if (!header.empty() && header != "\r\n" && header != "\n") {
             headers->push_back(header);
         }
+        return total;
+    }
+
+    static size_t write_body_stream(void* contents, size_t size, size_t nmemb,
+                                    StreamCallback* on_chunk) {
+        size_t total = size * nmemb;
+        std::string data(static_cast<char*>(contents), total);
+        (*on_chunk)(data);
         return total;
     }
 };
@@ -364,10 +428,133 @@ public:
         return cr;
     }
 
+    using TokenCallback = std::function<void(const std::string& token)>;
+
+    ChatResult chat_stream(const json& messages, TokenCallback on_token,
+                           const json& tools = json(),
+                           const std::string& model = "default") {
+        json body = {
+            {"model", model},
+            {"messages", messages},
+            {"stream", true},
+            {"stream_options", {{"include_usage", true}}}
+        };
+
+        if (!tools.empty()) {
+            body["tools"] = tools;
+            body["tool_choice"] = "auto";
+        }
+
+        std::string buffer;
+        std::vector<json> tool_calls_json;
+        std::string finish_reason;
+        std::string model_name;
+        int prompt_tokens = 0;
+        int completion_tokens = 0;
+        int total_tokens = 0;
+
+        auto start = std::chrono::steady_clock::now();
+
+        http_.post_stream(chat_url_, body,
+            [&](const std::string& chunk) {
+                buffer += chunk;
+
+                while (true) {
+                    size_t pos = buffer.find("\n\n");
+                    if (pos == std::string::npos) break;
+
+                    std::string event = buffer.substr(0, pos);
+                    buffer.erase(0, pos + 2);
+
+                    for (const auto& line : split_lines(event)) {
+                        if (line.substr(0, 6) != "data: ") continue;
+                        std::string data = line.substr(6);
+                        if (data == "[DONE]") return;
+
+                        try {
+                            auto j = json::parse(data);
+
+                            if (j.contains("model"))
+                                model_name = j["model"].get<std::string>();
+
+                            if (j.contains("usage")) {
+                                auto& u = j["usage"];
+                                prompt_tokens = u.value("prompt_tokens", 0);
+                                completion_tokens = u.value("completion_tokens", 0);
+                                total_tokens = u.value("total_tokens", 0);
+                            }
+
+                            if (!j.contains("choices") || j["choices"].empty()) continue;
+                            auto& choice = j["choices"][0];
+
+                            if (choice.contains("finish_reason") && !choice["finish_reason"].is_null())
+                                finish_reason = choice["finish_reason"].get<std::string>();
+
+                            if (!choice.contains("delta")) continue;
+                            auto& delta = choice["delta"];
+                            if (delta.contains("content") && !delta["content"].is_null()) {
+                                std::string token = delta["content"].get<std::string>();
+                                on_token(token);
+                            }
+
+                            if (delta.contains("tool_calls") && !delta["tool_calls"].is_null()) {
+                                for (auto& tc : delta["tool_calls"]) {
+                                    int idx = tc.value("index", 0);
+                                    while (static_cast<int>(tool_calls_json.size()) <= idx) {
+                                        tool_calls_json.push_back(json{{"type", "function"}, {"id", ""}, {"function", {{"name", ""}, {"arguments", ""}}}});
+                                    }
+                                    auto& existing = tool_calls_json[idx];
+                                    if (tc.contains("id") && !tc["id"].is_null())
+                                        existing["id"] = tc["id"];
+                                    if (tc.contains("function")) {
+                                        auto& fn = tc["function"];
+                                        if (fn.contains("name") && !fn["name"].is_null())
+                                            existing["function"]["name"] = fn["name"];
+                                        if (fn.contains("arguments") && !fn["arguments"].is_null())
+                                            existing["function"]["arguments"] = existing["function"]["arguments"].get<std::string>() + fn["arguments"].get<std::string>();
+                                    }
+                                }
+                            }
+                        } catch (...) {}
+                    }
+                }
+            });
+
+        auto end = std::chrono::steady_clock::now();
+
+        json msg = {{"role", "assistant"}, {"content", ""}};
+        if (!tool_calls_json.empty()) {
+            msg["tool_calls"] = tool_calls_json;
+        }
+
+        ChatResult cr;
+        cr.message = msg;
+        cr.tool_calls = tool_calls_json;
+        cr.finish_reason = finish_reason;
+        cr.model_name = model_name;
+        cr.usage.prompt_tokens = prompt_tokens;
+        cr.usage.completion_tokens = completion_tokens;
+        cr.usage.total_tokens = total_tokens;
+        cr.duration_ms = static_cast<int>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count());
+
+        return cr;
+    }
+
 private:
     std::string chat_url_;
     std::string models_url_;
     const HttpClient& http_;
+
+    static std::vector<std::string> split_lines(const std::string& s) {
+        std::vector<std::string> lines;
+        std::istringstream iss(s);
+        std::string line;
+        while (std::getline(iss, line)) {
+            lines.push_back(line);
+        }
+        return lines;
+    }
 };
 
 int get_terminal_width() {
@@ -458,7 +645,7 @@ public:
         }
 
         while (g_running) {
-            char* line = readline(color(bold(">> "), 32).c_str());
+            char* line = readline(rl_prompt(color(bold(">> "), 32)).c_str());
             if (!line) {
                 std::cout << "\n";
                 break;
@@ -505,23 +692,44 @@ public:
 
             while (tool_loop && g_running && tool_call_count < max_tool_calls) {
                 try {
-                    auto result = llm.chat(messages, openai_tools);
+                    std::string full_content;
+                    bool first_token = true;
+
+                    auto result = llm.chat_stream(messages,
+                        [&](const std::string& token) {
+                            if (first_token) {
+                                std::cout << color(std::string(get_terminal_width(), '-'), 90) << "\n";
+                                std::cout << color(bold("Response: "), 36);
+                                std::cout.flush();
+                                first_token = false;
+                            }
+                            std::cout << token << std::flush;
+                            full_content += token;
+                        },
+                        openai_tools);
+
+                    if (!first_token) {
+                        std::cout << "\n";
+                        std::cout << color(std::string(get_terminal_width(), '-'), 90) << "\n";
+                    }
+
+                    result.content = full_content;
 
                     if (result.content.empty() && result.tool_calls.empty()) {
                         std::cout << color("[Model returned empty response]", 33) << "\n";
                         break;
                     }
 
-                    if (!result.content.empty()) {
-                        std::cout << color(std::string(get_terminal_width(), '-'), 90) << "\n";
-                        std::cout << color(bold("Response: "), 36) << result.content << "\n";
-                        std::cout << color(std::string(get_terminal_width(), '-'), 90) << "\n";
-                        print_stats(result);
-                    } else {
-                        print_stats(result);
-                    }
+                    print_stats(result);
 
-                    if (result.finish_reason == "tool_calls" && !result.tool_calls.empty()) {
+                    if (!result.tool_calls.empty()) {
+                        json assistant_msg = {
+                            {"role", "assistant"},
+                            {"content", full_content.empty() ? json() : json(full_content)}
+                        };
+                        assistant_msg["tool_calls"] = result.tool_calls;
+                        messages.push_back(assistant_msg);
+
                         for (const auto& tc : result.tool_calls) {
                             tool_call_count++;
 
@@ -565,12 +773,6 @@ public:
                                 tool_result_str = mcp_result.dump(2);
                             }
 
-                            if (tool_result_str.length() > 500) {
-                                tool_result_str = tool_result_str.substr(0, 500)
-                                    + "\n... [result " + std::to_string(tool_result_str.length())
-                                    + " chars, truncated]";
-                            }
-
                             std::cout << color("  ← Result: ", 32)
                                       << tool_result_str << "\n\n";
                             std::cout.flush();
@@ -582,15 +784,6 @@ public:
                             };
                             messages.push_back(tool_msg);
                         }
-
-                        json assistant_msg = result.message;
-                        if (assistant_msg.contains("content") && assistant_msg["content"].is_null()) {
-                            assistant_msg["content"] = "";
-                        }
-                        if (!result.tool_calls.empty()) {
-                            assistant_msg["tool_calls"] = result.tool_calls;
-                        }
-                        messages.push_back(assistant_msg);
                     } else {
                         json assistant_msg = {
                             {"role", "assistant"},
@@ -624,12 +817,17 @@ private:
     void print_stats(const LLMClient::ChatResult& r) {
         std::ostringstream line;
         line << color(" ─ ", 90);
-        if (r.usage.completion_tokens > 0) {
-            int total = r.usage.total_tokens > 0 ? r.usage.total_tokens : r.usage.completion_tokens;
-            line << r.usage.prompt_tokens << " → " << r.usage.completion_tokens
+
+        int prompt_tokens = r.usage.prompt_tokens;
+        int completion_tokens = r.usage.completion_tokens;
+        int total_tokens = r.usage.total_tokens;
+
+        if (completion_tokens > 0) {
+            int total = total_tokens > 0 ? total_tokens : completion_tokens;
+            line << prompt_tokens << " → " << completion_tokens
                  << " tokens - ";
             double ts = r.duration_ms > 0
-                ? (r.usage.completion_tokens * 1000.0 / r.duration_ms) : 0.0;
+                ? (completion_tokens * 1000.0 / r.duration_ms) : 0.0;
             line << std::fixed << std::setprecision(1) << ts << " t/s - ";
             if (max_context_ > 0) {
                 line << "%" << (total * 100 / max_context_)
