@@ -115,6 +115,31 @@ public:
         return {json::parse(response_body), resp_headers, http_code};
     }
 
+    json get(const std::string& url, long timeout_ms = 10000) const {
+        std::string response_body;
+        auto* curl = curl_easy_init();
+        if (!curl) throw std::runtime_error("curl_easy_init failed");
+
+        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+        curl_easy_setopt(curl, CURLOPT_HTTPGET, 1L);
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_body);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_body);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, timeout_ms);
+        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, 5000);
+
+        CURLcode res = curl_easy_perform(curl);
+        long http_code = 0;
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+        curl_easy_cleanup(curl);
+
+        if (res != CURLE_OK)
+            throw std::runtime_error("HTTP GET failed: " + std::string(curl_easy_strerror(res)));
+        if (http_code < 200 || http_code >= 300)
+            throw std::runtime_error("HTTP error " + std::to_string(http_code) + ": " + response_body);
+
+        return json::parse(response_body);
+    }
+
 private:
     static size_t write_body(void* contents, size_t size, size_t nmemb, std::string* s) {
         size_t total = size * nmemb;
@@ -249,7 +274,7 @@ private:
 class LLMClient {
 public:
     LLMClient(std::string base_url, const HttpClient& http)
-        : chat_url_(base_url + "/v1/chat/completions"), http_(http) {}
+        : chat_url_(base_url + "/v1/chat/completions"), models_url_(base_url + "/v1/models"), http_(http) {}
 
     struct Usage {
         int prompt_tokens = 0;
@@ -266,6 +291,32 @@ public:
         Usage usage;
         int duration_ms = 0;
     };
+
+    struct ModelInfo {
+        std::string name;
+        int max_context = 0;
+    };
+
+    ModelInfo fetch_model_info() {
+        ModelInfo info;
+        try {
+            auto resp = http_.get(models_url_, 5000);
+            auto& data = resp["data"];
+            if (!data.empty()) {
+                auto& model = data[0];
+                info.name = model.value("id", "");
+                if (model.contains("meta")) {
+                    auto& meta = model["meta"];
+                    info.max_context = meta.value("n_ctx", 0);
+                    if (info.max_context == 0)
+                        info.max_context = meta.value("max_context_length", 0);
+                    if (info.max_context == 0)
+                        info.max_context = meta.value("n_ctx_train", 0);
+                }
+            }
+        } catch (...) {}
+        return info;
+    }
 
     ChatResult chat(const json& messages, const json& tools = json(),
                     const std::string& model = "default") {
@@ -315,6 +366,7 @@ public:
 
 private:
     std::string chat_url_;
+    std::string models_url_;
     const HttpClient& http_;
 };
 
@@ -346,6 +398,16 @@ public:
         HttpClient http;
         MCPClient mcp(mcp_url_, http);
         LLMClient llm(llm_url_, http);
+
+        // Model bilgisini sunucudan al (max context dahil)
+        {
+            auto info = llm.fetch_model_info();
+            if (info.max_context > 0) {
+                max_context_ = info.max_context;
+                std::cout << color("Model: ", 90) << info.name
+                          << color(", context: ", 90) << max_context_ << "\n";
+            }
+        }
 
         // MCP sunucusuna bağlan
         std::cout << "MCP sunucusuna bağlanılıyor: " << mcp_url_ << " ... ";
@@ -576,14 +638,11 @@ private:
                      << " context (" << total << "/" << max_context_ << ") - ";
             }
         }
-        line << r.duration_ms << "ms" << " - ";
+        line << r.duration_ms << "ms";
 
         if (!r.model_name.empty()) {
-            struct winsize ws;
-            int cols = 80;
-            if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) != -1) {
-                cols = ws.ws_col;
-            }
+            line << " - ";
+            int cols = get_terminal_width();
             std::string raw = line.str();
             size_t visible = 0;
             bool in_escape = false;
