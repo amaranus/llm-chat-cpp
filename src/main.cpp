@@ -437,10 +437,13 @@ public:
                     }
 
                     if (!result.content.empty()) {
-                        std::cout << color(bold("Yanıt: "), 36) << result.content << "\n\n";
+                        std::cout << color("──────────────────────────────────────────────────", 90) << "\n";
+                        std::cout << color(bold("Yanıt: "), 36) << result.content << "\n";
+                        print_stats(result);
+                        std::cout << color("──────────────────────────────────────────────────", 90) << "\n\n";
+                    } else {
+                        print_stats(result);
                     }
-
-                    print_stats(result);
 
                     if (result.finish_reason == "tool_calls" && !result.tool_calls.empty()) {
                         for (const auto& tc : result.tool_calls) {
