@@ -1,4 +1,4 @@
-# llm-chat — MCP-Powered Terminal Chat
+# llm-chat-cpp — MCP-Powered Terminal Chat
 
 A C++ terminal chat application that connects to llama.cpp and an MCP server for tool-assisted conversations.
 
