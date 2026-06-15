@@ -8,8 +8,13 @@
 #include <sstream>
 #include <iomanip>
 #include <cstdlib>
+#include <fstream>
+#include <filesystem>
+#include <algorithm>
 #include <readline/readline.h>
 #include <readline/history.h>
+
+namespace fs = std::filesystem;
 
 static std::atomic<bool> g_running{true};
 static std::mutex g_print_mutex;
@@ -18,8 +23,252 @@ static void signal_handler(int) {
     g_running = false;
 }
 
+static std::string to_lower(const std::string& s) {
+    std::string result = s;
+    std::transform(result.begin(), result.end(), result.begin(), ::tolower);
+    return result;
+}
+
+static std::string detect_mime(const std::string& path) {
+    std::string ext = to_lower(fs::path(path).extension().string());
+    if (ext == ".jpg" || ext == ".jpeg") return "image/jpeg";
+    if (ext == ".png") return "image/png";
+    if (ext == ".gif") return "image/gif";
+    if (ext == ".webp") return "image/webp";
+    if (ext == ".svg") return "image/svg+xml";
+    if (ext == ".bmp") return "image/bmp";
+    if (ext == ".pdf") return "application/pdf";
+    if (ext == ".json") return "application/json";
+    if (ext == ".md" || ext == ".markdown") return "text/markdown";
+    if (ext == ".txt" || ext == ".log") return "text/plain";
+    if (ext == ".cpp" || ext == ".cc" || ext == ".cxx") return "text/x-c++src";
+    if (ext == ".c" || ext == ".h" || ext == ".hpp") return "text/x-csrc";
+    if (ext == ".py") return "text/x-python";
+    if (ext == ".js" || ext == ".ts") return "text/javascript";
+    if (ext == ".rs") return "text/x-rust";
+    if (ext == ".go") return "text/x-go";
+    if (ext == ".java") return "text/x-java";
+    if (ext == ".sh" || ext == ".bash") return "text/x-shellscript";
+    if (ext == ".yaml" || ext == ".yml") return "text/yaml";
+    if (ext == ".xml") return "text/xml";
+    if (ext == ".html" || ext == ".htm") return "text/html";
+    if (ext == ".css") return "text/css";
+    if (ext == ".csv") return "text/csv";
+    if (ext == ".toml") return "text/plain";
+    return "text/plain";
+}
+
+static bool is_image_mime(const std::string& mime) {
+    return mime.find("image/") == 0;
+}
+
+static std::string base64_encode(const std::string& input) {
+    static const char table[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string result;
+    result.reserve(((input.size() + 2) / 3) * 4);
+    for (size_t i = 0; i < input.size(); i += 3) {
+        unsigned int n = static_cast<unsigned char>(input[i]) << 16;
+        if (i + 1 < input.size()) n |= static_cast<unsigned char>(input[i + 1]) << 8;
+        if (i + 2 < input.size()) n |= static_cast<unsigned char>(input[i + 2]);
+        result += table[(n >> 18) & 0x3F];
+        result += table[(n >> 12) & 0x3F];
+        result += (i + 1 < input.size()) ? table[(n >> 6) & 0x3F] : '=';
+        result += (i + 2 < input.size()) ? table[n & 0x3F] : '=';
+    }
+    return result;
+}
+
+static std::string read_file_binary(const std::string& path) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file.is_open()) return "";
+    std::ostringstream ss;
+    ss << file.rdbuf();
+    return ss.str();
+}
+
+static std::string read_file_text(const std::string& path) {
+    std::ifstream file(path);
+    if (!file.is_open()) return "";
+    std::ostringstream ss;
+    ss << file.rdbuf();
+    return ss.str();
+}
+
 ChatApp::ChatApp(std::string llm_url, std::string mcp_url, int max_context)
     : llm_url_(std::move(llm_url)), mcp_url_(std::move(mcp_url)), max_context_(max_context) {}
+
+void ChatApp::add_file(const std::string& path) {
+    fs::file_status status;
+    try {
+        status = fs::status(path);
+    } catch (const fs::filesystem_error& e) {
+        std::cout << utils::color("Error: ", 31) << e.what() << "\n";
+        return;
+    }
+
+    if (!fs::exists(status)) {
+        std::cout << utils::color("Error: ", 31) << "File not found: " << path << "\n";
+        return;
+    }
+
+    if (fs::is_directory(status)) {
+        std::cout << utils::color("Error: ", 31) << "Path is a directory: " << path << "\n";
+        return;
+    }
+
+    std::string abs_path = fs::absolute(path).string();
+    std::string filename = fs::path(path).filename().string();
+    std::string mime = detect_mime(abs_path);
+    bool is_image = is_image_mime(mime);
+
+    std::string content;
+    if (is_image) {
+        content = base64_encode(read_file_binary(abs_path));
+    } else {
+        content = read_file_text(abs_path);
+    }
+
+    if (content.empty()) {
+        std::cout << utils::color("Error: ", 31) << "Could not read file: " << path << "\n";
+        return;
+    }
+
+    FileAttachment fa;
+    fa.path = abs_path;
+    fa.filename = filename;
+    fa.content = content;
+    fa.mime_type = mime;
+    fa.is_image = is_image;
+
+    files_.push_back(std::move(fa));
+
+    std::cout << utils::color("File added: ", 32) << filename
+              << " (" << mime;
+    if (is_image) {
+        std::cout << ", " << (content.size() * 100 / 1024 / 1024 + 1) << " KB encoded";
+    } else {
+        std::cout << ", " << content.size() << " bytes";
+    }
+    std::cout << ")\n";
+}
+
+void ChatApp::remove_file(const std::string& path) {
+    std::string abs_path;
+    try {
+        abs_path = fs::absolute(path).string();
+    } catch (...) {
+        abs_path = path;
+    }
+
+    for (auto it = files_.begin(); it != files_.end(); ++it) {
+        if (it->path == abs_path || it->filename == path) {
+            std::cout << utils::color("File removed: ", 33) << it->filename << "\n";
+            files_.erase(it);
+            return;
+        }
+    }
+    std::cout << utils::color("File not found in attachments: ", 33) << path << "\n";
+}
+
+void ChatApp::list_files() {
+    if (files_.empty()) {
+        std::cout << "No files attached.\n";
+        return;
+    }
+    std::cout << "Attached files (" << files_.size() << "):\n";
+    for (size_t i = 0; i < files_.size(); ++i) {
+        const auto& f = files_[i];
+        std::cout << "  " << (i + 1) << ". " << utils::color(f.filename, 36)
+                  << " (" << f.mime_type;
+        if (f.is_image) {
+            std::cout << ", image";
+        } else {
+            std::cout << ", " << f.content.size() << " bytes";
+        }
+        std::cout << ")\n";
+    }
+}
+
+void ChatApp::clear_files() {
+    files_.clear();
+    std::cout << "All files removed.\n";
+}
+
+llm::LLMClient::json ChatApp::build_user_message(const std::string& text) {
+    if (files_.empty()) {
+        return {{"role", "user"}, {"content", text}};
+    }
+
+    llm::LLMClient::json content = llm::LLMClient::json::array();
+
+    for (const auto& f : files_) {
+        if (f.is_image) {
+            content.push_back({
+                {"type", "image_url"},
+                {"image_url", {
+                    {"url", "data:" + f.mime_type + ";base64," + f.content}
+                }}
+            });
+        } else {
+            std::string file_block = "[" + f.filename + "]\n" + f.content;
+            content.push_back({{"type", "text"}, {"text", file_block}});
+        }
+    }
+
+    if (!text.empty()) {
+        content.push_back({{"type", "text"}, {"text", text}});
+    }
+
+    return {{"role", "user"}, {"content", content}};
+}
+
+bool ChatApp::handle_command(const std::string& input, llm::LLMClient::json& messages) {
+    if (input == "/quit" || input == "/exit") {
+        std::cout << "Bye.\n";
+        return false;
+    }
+    if (input == "/help") {
+        print_help();
+        return true;
+    }
+    if (input == "/clear") {
+        messages = llm::LLMClient::json::array();
+        std::cout << "Chat history cleared.\n";
+        return true;
+    }
+    if (input == "/tools") {
+        std::cout << "Use /help to see commands.\n";
+        return true;
+    }
+    if (input == "/files") {
+        list_files();
+        return true;
+    }
+    if (input == "/clearfiles") {
+        clear_files();
+        return true;
+    }
+    if (input.substr(0, 6) == "/read ") {
+        std::string path = utils::trim(input.substr(6));
+        if (path.empty()) {
+            std::cout << utils::color("Usage: ", 33) << "/read <file_path>\n";
+        } else {
+            add_file(path);
+        }
+        return true;
+    }
+    if (input.substr(0, 8) == "/remove ") {
+        std::string path = utils::trim(input.substr(8));
+        if (path.empty()) {
+            std::cout << utils::color("Usage: ", 33) << "/remove <file_path>\n";
+        } else {
+            remove_file(path);
+        }
+        return true;
+    }
+    return true;
+}
 
 void ChatApp::run() {
     signal(SIGINT, signal_handler);
@@ -100,30 +349,13 @@ void ChatApp::run() {
         if (input.empty()) continue;
         add_history(input.c_str());
 
-        if (input == "/quit" || input == "/exit") {
-            std::cout << "Bye.\n";
+        if (input[0] == '/') {
+            bool handled = handle_command(input, messages);
+            if (handled) continue;
             break;
         }
-        if (input == "/help") {
-            print_help();
-            continue;
-        }
-        if (input == "/clear") {
-            messages = llm::LLMClient::json::array();
-            std::cout << "Chat history cleared.\n";
-            continue;
-        }
-        if (input == "/tools") {
-            std::cout << "MCP tools (" << tools.size() << "): ";
-            for (size_t i = 0; i < tools.size(); ++i) {
-                if (i > 0) std::cout << ", ";
-                std::cout << utils::color(tools[i].name, 36);
-            }
-            std::cout << "\n";
-            continue;
-        }
 
-        messages.push_back({{"role", "user"}, {"content", input}});
+        messages.push_back(build_user_message(input));
 
         bool tool_loop = true;
         int tool_call_count = 0;
@@ -277,7 +509,10 @@ void ChatApp::print_help() {
     std::cout << "  " << utils::color("/quit", 33) << " or " << utils::color("/exit", 33) << " — Exit\n";
     std::cout << "  " << utils::color("/help", 33) << " — Show this help\n";
     std::cout << "  " << utils::color("/clear", 33) << " — Clear chat history\n";
-    std::cout << "  " << utils::color("/tools", 33) << " — List MCP tools\n";
+    std::cout << "  " << utils::color("/read <path>", 33) << " — Add file to context (text, image, pdf)\n";
+    std::cout << "  " << utils::color("/files", 33) << " — List attached files\n";
+    std::cout << "  " << utils::color("/remove <path>", 33) << " — Remove attached file\n";
+    std::cout << "  " << utils::color("/clearfiles", 33) << " — Remove all attached files\n";
     std::cout << utils::color(std::string(utils::get_terminal_width(), '-'), 90) << "\n";
 }
 
