@@ -83,6 +83,11 @@ export LLM_CHAT_MAX_CONTEXT=4096
 | `/help` | Show command list |
 | `/clear` | Clear chat history |
 | `/tools` | List MCP tools |
+| `/read` | Add file to context |
+| `/files` | List attached files |
+| `/remove` | Remove attached file |
+| `/clearfiles` | Remove all attached files |
+
 
 ## Architecture
 

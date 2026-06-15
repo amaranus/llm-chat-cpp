@@ -223,7 +223,8 @@ llm::LLMClient::json ChatApp::build_user_message(const std::string& text) {
     return {{"role", "user"}, {"content", content}};
 }
 
-bool ChatApp::handle_command(const std::string& input, llm::LLMClient::json& messages) {
+bool ChatApp::handle_command(const std::string& input, json& messages,
+                             const std::vector<mcp::MCPTool>& tools) {
     if (input == "/quit" || input == "/exit") {
         std::cout << "Bye.\n";
         return false;
@@ -238,7 +239,16 @@ bool ChatApp::handle_command(const std::string& input, llm::LLMClient::json& mes
         return true;
     }
     if (input == "/tools") {
-        std::cout << "Use /help to see commands.\n";
+        if (tools.empty()) {
+            std::cout << "No MCP tools available.\n";
+        } else {
+            std::cout << "MCP tools (" << tools.size() << "): ";
+            for (size_t i = 0; i < tools.size(); ++i) {
+                if (i > 0) std::cout << ", ";
+                std::cout << utils::color(tools[i].name, 36);
+            }
+            std::cout << "\n";
+        }
         return true;
     }
     if (input == "/files") {
@@ -350,7 +360,7 @@ void ChatApp::run() {
         add_history(input.c_str());
 
         if (input[0] == '/') {
-            bool handled = handle_command(input, messages);
+            bool handled = handle_command(input, messages, tools);
             if (handled) continue;
             break;
         }
@@ -508,6 +518,7 @@ void ChatApp::print_help() {
     std::cout << "Commands:\n";
     std::cout << "  " << utils::color("/quit", 33) << " or " << utils::color("/exit", 33) << " — Exit\n";
     std::cout << "  " << utils::color("/help", 33) << " — Show this help\n";
+    std::cout << "  " << utils::color("/tools", 33) << " — List MCP tools\n";
     std::cout << "  " << utils::color("/clear", 33) << " — Clear chat history\n";
     std::cout << "  " << utils::color("/read <path>", 33) << " — Add file to context (text, image, pdf)\n";
     std::cout << "  " << utils::color("/files", 33) << " — List attached files\n";

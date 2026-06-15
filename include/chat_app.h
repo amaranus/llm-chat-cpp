@@ -24,8 +24,11 @@ private:
     void print_help();
     void print_stats(const llm::LLMClient::ChatResult& r);
 
+    using json = llm::LLMClient::json;
+
     bool handle_command(const std::string& input,
-                        llm::LLMClient::json& messages);
+                        json& messages,
+                        const std::vector<mcp::MCPTool>& tools);
     void add_file(const std::string& path);
     void remove_file(const std::string& path);
     void list_files();
