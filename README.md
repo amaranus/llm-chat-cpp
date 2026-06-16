@@ -1,5 +1,7 @@
 # llm-chat-cpp — MCP-Powered Terminal Chat
-
+<p>
+  <img src="./llm-chat-cpp-logo.png" alt="llm-chat-cpp-logo" width="400" height="200">
+</p>
 A C++ terminal chat application that connects to llama.cpp and an MCP server for tool-assisted conversations.
 
 ## Requirements
@@ -81,8 +83,8 @@ uv run server.py
 | `LLM_CHAT_MAX_CONTEXT` | `8192` | Max context token count (for percentage display) |
 
 ```bash
-export LLM_CHAT_LLM_URL="http://10.0.0.1:8080"
-export LLM_CHAT_MCP_URL="http://10.0.0.1:8000/mcp"
+export LLM_CHAT_LLM_URL="http://127.0.0.1:8080"
+export LLM_CHAT_MCP_URL="http://127.0.0.1:8000/mcp"
 export LLM_CHAT_MAX_CONTEXT=4096
 ./build/llm-chat
 ```
@@ -108,12 +110,12 @@ export LLM_CHAT_MAX_CONTEXT=4096
 
 ```
 ┌─────────────┐      ┌──────────────┐      ┌──────────────┐
-│  llm-chat   │─────▶│  llama.cpp   │      │  MCP Server  │
+│  llm-chat   │────▶│  llama.cpp   │      │  MCP Server  │
 │  (C++ CLI)  │      │  :8080       │      │  :8000/mcp   │
 │             │      │  /v1/chat/   │      │  JSON-RPC    │
 │             │      │  completions │      │  tools/list  │
 │             │      └──────────────┘      │  tools/call  │
-│             │                           └──────────────┘
+│             │                            └──────────────┘
 └─────────────┘
 ```
 
@@ -122,3 +124,11 @@ export LLM_CHAT_MAX_CONTEXT=4096
 3. Tool result sent back to model
 4. Model final response displayed to user
 5. Stats shown after each response (tokens, time, t/s, context %)
+
+<div align="center">
+
+[![](https://img.shields.io/badge/@amaranusX-1DA1F2?style=flat-square&logo=x&logoColor=white)](https://x.com/amaranusx)
+[![](https://img.shields.io/badge/amaranus-181717?style=flat-square&logo=github&logoColor=white)](https://github.com/amaranus)
+[![](https://img.shields.io/badge/@amaranus-E4405F?style=flat-square&logo=instagram&logoColor=white)](https://instagram.com/amaranus)
+
+</div>
