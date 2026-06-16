@@ -36,7 +36,8 @@ LLMClient::ChatResult LLMClient::chat(const json& messages, const json& tools,
     json body = {
         {"model", model},
         {"messages", messages},
-        {"stream", false}
+        {"stream", false},
+        {"timings_per_token", true}
     };
 
     if (!tools.empty()) {
@@ -67,6 +68,14 @@ LLMClient::ChatResult LLMClient::chat(const json& messages, const json& tools,
         cr.usage.total_tokens = u.value("total_tokens", 0);
     }
 
+    if (msg.contains("reasoning_content") && !msg["reasoning_content"].is_null()) {
+        cr.reasoning_content = msg["reasoning_content"].get<std::string>();
+    }
+
+    if (resp.contains("timings")) {
+        cr.tokens_per_second = resp["timings"].value("predicted_per_second", 0.0);
+    }
+
     if (msg.contains("tool_calls") && !msg["tool_calls"].is_null()) {
         for (const auto& tc : msg["tool_calls"]) {
             cr.tool_calls.push_back(tc);
@@ -82,7 +91,8 @@ LLMClient::ChatResult LLMClient::chat_stream(const json& messages, TokenCallback
         {"model", model},
         {"messages", messages},
         {"stream", true},
-        {"stream_options", {{"include_usage", true}}}
+        {"stream_options", {{"include_usage", true}}},
+        {"timings_per_token", true}
     };
 
     if (!tools.empty()) {
@@ -97,6 +107,8 @@ LLMClient::ChatResult LLMClient::chat_stream(const json& messages, TokenCallback
     int prompt_tokens = 0;
     int completion_tokens = 0;
     int total_tokens = 0;
+    std::string reasoning_content;
+    double tokens_per_second = 0.0;
 
     auto start = std::chrono::steady_clock::now();
 
@@ -129,6 +141,10 @@ LLMClient::ChatResult LLMClient::chat_stream(const json& messages, TokenCallback
                             total_tokens = u.value("total_tokens", 0);
                         }
 
+                        if (j.contains("timings")) {
+                            tokens_per_second = j["timings"].value("predicted_per_second", 0.0);
+                        }
+
                         if (!j.contains("choices") || j["choices"].empty()) continue;
                         auto& choice = j["choices"][0];
 
@@ -137,9 +153,16 @@ LLMClient::ChatResult LLMClient::chat_stream(const json& messages, TokenCallback
 
                         if (!choice.contains("delta")) continue;
                         auto& delta = choice["delta"];
+
+                        if (delta.contains("reasoning_content") && !delta["reasoning_content"].is_null()) {
+                            std::string token = delta["reasoning_content"].get<std::string>();
+                            reasoning_content += token;
+                            on_token(token, true);
+                        }
+
                         if (delta.contains("content") && !delta["content"].is_null()) {
                             std::string token = delta["content"].get<std::string>();
-                            on_token(token);
+                            on_token(token, false);
                         }
 
                         if (delta.contains("tool_calls") && !delta["tool_calls"].is_null()) {
@@ -186,6 +209,8 @@ LLMClient::ChatResult LLMClient::chat_stream(const json& messages, TokenCallback
     cr.usage.prompt_tokens = prompt_tokens;
     cr.usage.completion_tokens = completion_tokens;
     cr.usage.total_tokens = total_tokens;
+    cr.reasoning_content = reasoning_content;
+    cr.tokens_per_second = tokens_per_second;
     cr.duration_ms = static_cast<int>(
         std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count());
 

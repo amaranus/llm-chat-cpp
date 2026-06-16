@@ -374,7 +374,8 @@ void ChatApp::run() {
         while (tool_loop && g_running && tool_call_count < max_tool_calls) {
             try {
                 std::string full_content;
-                bool first_token = true;
+                bool stream_started = false;
+                bool is_reasoning = false;
 
                 std::atomic<bool> thinking_done{false};
                 std::thread thinking_thread([&]() {
@@ -391,30 +392,54 @@ void ChatApp::run() {
                 });
 
                 auto result = llm.chat_stream(messages,
-                    [&](const std::string& token) {
-                        if (first_token) {
+                    [&](const std::string& token, bool reasoning) {
+                        if (!stream_started) {
+                            stream_started = true;
                             thinking_done = true;
                             thinking_thread.join();
                             std::lock_guard<std::mutex> lock(g_print_mutex);
                             std::cout << "\r" << std::string(utils::get_terminal_width(), ' ') << "\r";
                             std::cout << utils::color(std::string(utils::get_terminal_width(), '-'), 90) << "\n";
-                            std::cout << utils::color(utils::bold("Response: "), 36);
                             std::cout.flush();
-                            first_token = false;
+
+                            if (reasoning) {
+                                is_reasoning = true;
+                                std::cout << utils::color("── Thinking ──", 90) << "\n";
+                                std::cout.flush();
+                            } else {
+                                std::cout << utils::color(utils::bold("Response: "), 36);
+                                std::cout.flush();
+                            }
                         }
-                        std::cout << token << std::flush;
-                        full_content += token;
+
+                        if (reasoning && !is_reasoning) {
+                            is_reasoning = true;
+                            std::cout << "\n" << utils::color("── Thinking ──", 90) << "\n";
+                            std::cout.flush();
+                        } else if (!reasoning && is_reasoning) {
+                            is_reasoning = false;
+                            std::cout << "\n" << utils::color("── Response ──", 90) << "\n";
+                            std::cout.flush();
+                        }
+
+                        if (reasoning) {
+                            std::lock_guard<std::mutex> lock(g_print_mutex);
+                            std::cout << utils::color(token, 90) << std::flush;
+                        } else {
+                            std::cout << token << std::flush;
+                            full_content += token;
+                        }
                     },
                     openai_tools);
 
-                if (first_token) {
+                if (!stream_started) {
                     thinking_done = true;
                     if (thinking_thread.joinable()) thinking_thread.join();
                     std::lock_guard<std::mutex> lock(g_print_mutex);
                     std::cout << "\r" << std::string(utils::get_terminal_width(), ' ') << "\r" << std::flush;
                 }
 
-                if (!first_token) {
+                if (stream_started) {
                     std::cout << "\n";
                     std::cout << utils::color(std::string(utils::get_terminal_width(), '-'), 90) << "\n";
                 }
@@ -535,8 +560,9 @@ void ChatApp::print_stats(const llm::LLMClient::ChatResult& r) {
         int total = r.usage.total_tokens > 0 ? r.usage.total_tokens : r.usage.completion_tokens;
         line << r.usage.prompt_tokens << " → " << r.usage.completion_tokens
              << " tokens - ";
-        double ts = r.duration_ms > 0
-            ? (r.usage.completion_tokens * 1000.0 / r.duration_ms) : 0.0;
+        double ts = r.tokens_per_second > 0.0
+            ? r.tokens_per_second
+            : (r.duration_ms > 0 ? (r.usage.completion_tokens * 1000.0 / r.duration_ms) : 0.0);
         line << std::fixed << std::setprecision(1) << ts << " t/s - ";
         if (max_context_ > 0) {
             line << "%" << (total * 100 / max_context_)

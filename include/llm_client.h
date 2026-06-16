@@ -19,10 +19,12 @@ public:
     struct ChatResult {
         json message;
         std::string content;
+        std::string reasoning_content;
         std::vector<json> tool_calls;
         std::string finish_reason;
         std::string model_name;
         Usage usage;
+        double tokens_per_second = 0.0;
         int duration_ms = 0;
     };
 
@@ -31,7 +33,7 @@ public:
         int max_context = 0;
     };
 
-    using TokenCallback = std::function<void(const std::string& token)>;
+    using TokenCallback = std::function<void(const std::string& token, bool is_reasoning)>;
 
     LLMClient(std::string base_url, const http::HttpClient& http);
 
