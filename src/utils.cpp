@@ -2,8 +2,13 @@
 #include <algorithm>
 #include <cstdlib>
 #include <sstream>
+
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <sys/ioctl.h>
 #include <unistd.h>
+#endif
 
 namespace utils {
 
@@ -40,11 +45,20 @@ std::string trim(const std::string& s) {
 }
 
 int get_terminal_width() {
+#ifdef _WIN32
+    CONSOLE_SCREEN_BUFFER_INFO csbi;
+    HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (h != INVALID_HANDLE_VALUE && GetConsoleScreenBufferInfo(h, &csbi)) {
+        return csbi.srWindow.Right - csbi.srWindow.Left + 1;
+    }
+    return 80;
+#else
     struct winsize w;
     if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &w) == 0) {
         return w.ws_col;
     }
     return 80;
+#endif
 }
 
 std::vector<std::string> split_lines(const std::string& s) {

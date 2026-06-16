@@ -4,11 +4,12 @@ A C++ terminal chat application that connects to llama.cpp and an MCP server for
 
 ## Requirements
 
-- C++17 compiler (g++ ≥ 9, clang ≥ 10)
+- C++17 compiler (g++ ≥ 9, clang ≥ 10, or MSVC 2019+)
 - CMake ≥ 3.16
 - libcurl (development headers)
-- GNU Readline (development headers)
+- GNU Readline (development headers, Linux only)
 - nlohmann/json (development headers)
+- [vcpkg](https://github.com/microsoft/vcpkg) (Windows only)
 
 ### Ubuntu/Debian
 
@@ -30,12 +31,25 @@ sudo dnf install gcc-c++ cmake libcurl-devel readline-devel nlohmann-json-devel
 
 ## Build
 
+### Linux
+
 ```bash
 cmake -B build
 cmake --build build
 ```
 
 Binary: `build/llm-chat`
+
+### Windows (MSVC + vcpkg)
+
+```powershell
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=<vcpkg_root>\scripts\buildsystems\vcpkg.cmake
+cmake --build build --config Release
+```
+
+Binary: `build\Release\llm-chat.exe`
+
+> Dependencies (`curl`, `nlohmann-json`) are installed automatically via vcpkg manifest (`vcpkg.json`).
 
 ## Usage
 

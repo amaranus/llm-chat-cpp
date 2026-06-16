@@ -3,7 +3,15 @@
 #include "chat_app.h"
 #include "utils.h"
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 int main(int argc, char* argv[]) {
+#ifdef _WIN32
+    SetConsoleOutputCP(CP_UTF8);
+    SetConsoleCP(CP_UTF8);
+#endif
     std::string llm_url = utils::env_or("LLM_CHAT_LLM_URL", "http://localhost:8080");
     std::string mcp_url = utils::env_or("LLM_CHAT_MCP_URL", "http://localhost:8000/mcp");
     int max_context = utils::env_int("LLM_CHAT_MAX_CONTEXT", 8192);

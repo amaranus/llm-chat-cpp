@@ -11,8 +11,7 @@
 #include <fstream>
 #include <filesystem>
 #include <algorithm>
-#include <readline/readline.h>
-#include <readline/history.h>
+#include "readline_compat.h"
 
 namespace fs = std::filesystem;
 
