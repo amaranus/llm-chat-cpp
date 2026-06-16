@@ -286,8 +286,11 @@ bool ChatApp::handle_command(const std::string& input, json& messages,
         std::cout << utils::color("Router Models:\n", 90);
         for (size_t i = 0; i < models.size(); ++i) {
             std::cout << "  " << utils::color(std::to_string(i + 1), 33) << ". " << models[i].id;
+            if (models[i].max_context > 0) {
+                std::cout << utils::color(" [ctx: " + std::to_string(models[i].max_context) + "]", 32);
+            }
             if (models[i].status == "loaded") {
-                std::cout << utils::color(" (loaded", 32) << utils::color(" ✓)", 32);
+                std::cout << utils::color(" (loaded ✓)", 32);
                 if (models[i].id == selected_model_) {
                     std::cout << utils::color(" ← current", 36);
                 }
@@ -311,7 +314,10 @@ bool ChatApp::handle_command(const std::string& input, json& messages,
                 int idx = std::stoi(line);
                 if (idx >= 1 && idx <= static_cast<int>(models.size())) {
                     selected_model_ = models[idx - 1].id;
-                    std::cout << utils::color("Switched to: ", 32) << selected_model_ << "\n";
+                    int ctx = models[idx - 1].max_context;
+                    if (ctx > 0) max_context_ = ctx;
+                    std::cout << utils::color("Switched to: ", 32) << selected_model_
+                              << utils::color(", context: ", 90) << max_context_ << "\n";
                 } else if (idx == static_cast<int>(models.size() + 1)) {
                     for (const auto& m : models) {
                         if (m.status == "loaded") {
@@ -350,25 +356,28 @@ void ChatApp::run() {
         }
         std::cout << utils::color("Server: ", 90) << llm_url_ << "\n";
 
-        auto models = llm.fetch_models();
-        if (models.empty()) {
+        auto models_with_status = llm.fetch_models_with_status();
+        if (models_with_status.empty()) {
             selected_model_ = "default";
             std::cout << utils::color("Model: ", 90) << info.name
                       << utils::color(", context: ", 90) << max_context_ << "\n";
         } else {
             std::cout << utils::color("Models:\n", 90);
-            for (size_t i = 0; i < models.size(); ++i) {
+            for (size_t i = 0; i < models_with_status.size(); ++i) {
+                const auto& m = models_with_status[i];
+                int ctx = m.max_context > 0 ? m.max_context : max_context_;
                 std::cout << "  " << utils::color(std::to_string(i + 1), 33)
-                          << ". " << models[i];
-                if (models[i] == info.name) {
-                    std::cout << utils::color(" (current)", 90);
+                          << ". " << m.id;
+                if (m.status == "loaded") {
+                    std::cout << utils::color(" (loaded)", 32);
                 }
-                if (info.max_context > 0 && models[i] == info.name) {
-                    std::cout << utils::color(" [ctx: " + std::to_string(max_context_) + "]", 32);
+                if (ctx > 0) {
+                    std::cout << utils::color(" [ctx: " + std::to_string(ctx) + "]", 32);
                 }
                 std::cout << "\n";
             }
-            std::cout << utils::color("Select model [1-" + std::to_string(models.size()) + "]: ", 36);
+            std::cout << utils::color("Select model [1-"
+                                      + std::to_string(models_with_status.size()) + "]: ", 36);
             std::cout.flush();
 
             std::string input;
@@ -376,14 +385,18 @@ void ChatApp::run() {
             if (!input.empty()) {
                 try {
                     int idx = std::stoi(input);
-                    if (idx >= 1 && idx <= static_cast<int>(models.size())) {
-                        selected_model_ = models[idx - 1];
+                    if (idx >= 1 && idx <= static_cast<int>(models_with_status.size())) {
+                        selected_model_ = models_with_status[idx - 1].id;
+                        int ctx = models_with_status[idx - 1].max_context;
+                        if (ctx > 0) max_context_ = ctx;
                     }
                 } catch (...) {}
             }
 
             if (selected_model_.empty()) {
-                selected_model_ = models[0];
+                selected_model_ = models_with_status[0].id;
+                int ctx = models_with_status[0].max_context;
+                if (ctx > 0) max_context_ = ctx;
             }
             std::cout << utils::color("Using: ", 32) << selected_model_
                       << utils::color(", context: ", 90) << max_context_ << "\n";

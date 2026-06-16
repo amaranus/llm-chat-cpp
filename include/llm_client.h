@@ -36,6 +36,7 @@ public:
     struct ModelStatus {
         std::string id;
         std::string status;
+        int max_context = 0;
     };
 
     using TokenCallback = std::function<void(const std::string& token, bool is_reasoning)>;

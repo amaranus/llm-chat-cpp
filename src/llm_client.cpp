@@ -63,6 +63,16 @@ std::vector<LLMClient::ModelStatus> LLMClient::fetch_models_with_status() {
             if (m.contains("status") && m["status"].contains("value")) {
                 ms.status = m["status"]["value"].get<std::string>();
             }
+            if (m.contains("status") && m["status"].contains("args")) {
+                auto& args = m["status"]["args"];
+                for (size_t i = 0; i + 1 < args.size(); ++i) {
+                    std::string a = args[i].get<std::string>();
+                    if (a == "--ctx-size" || a == "-c") {
+                        ms.max_context = std::stoi(args[i + 1].get<std::string>());
+                        break;
+                    }
+                }
+            }
             models.push_back(std::move(ms));
         }
     } catch (...) {}
