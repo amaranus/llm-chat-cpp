@@ -87,6 +87,7 @@ export LLM_CHAT_MAX_CONTEXT=4096
 | `/files` | List attached files |
 | `/remove` | Remove attached file |
 | `/clearfiles` | Remove all attached files |
+| `/models` | List / switch / unload models |
 
 
 ## Architecture
