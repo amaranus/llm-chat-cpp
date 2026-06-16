@@ -8,12 +8,17 @@ namespace llm {
 LLMClient::LLMClient(std::string base_url, const http::HttpClient& http)
     : chat_url_(base_url + "/v1/chat/completions"),
       models_url_(base_url + "/v1/models"),
+      router_url_(base_url + "/models"),
       http_(http) {}
+
+void LLMClient::set_abort_check(AbortCheck check) {
+    abort_ = std::move(check);
+}
 
 LLMClient::ModelInfo LLMClient::fetch_model_info() {
     ModelInfo info;
     try {
-        auto resp = http_.get(models_url_, 5000);
+        auto resp = http_.get(models_url_, 5000, abort_);
         auto& data = resp["data"];
         if (!data.empty()) {
             auto& model = data[0];
@@ -31,6 +36,49 @@ LLMClient::ModelInfo LLMClient::fetch_model_info() {
     return info;
 }
 
+std::vector<std::string> LLMClient::fetch_models() {
+    std::vector<std::string> models;
+    try {
+        auto resp = http_.get(models_url_, 5000, abort_);
+        auto& data = resp["data"];
+        for (auto& m : data) {
+            std::string id = m.value("id", "");
+            if (!id.empty()) {
+                models.push_back(std::move(id));
+            }
+        }
+    } catch (...) {}
+    return models;
+}
+
+std::vector<LLMClient::ModelStatus> LLMClient::fetch_models_with_status() {
+    std::vector<ModelStatus> models;
+    try {
+        auto resp = http_.get(router_url_, 5000, abort_);
+        auto& data = resp["data"];
+        for (auto& m : data) {
+            ModelStatus ms;
+            ms.id = m.value("id", "");
+            if (ms.id.empty()) continue;
+            if (m.contains("status") && m["status"].contains("value")) {
+                ms.status = m["status"]["value"].get<std::string>();
+            }
+            models.push_back(std::move(ms));
+        }
+    } catch (...) {}
+    return models;
+}
+
+bool LLMClient::unload_model(const std::string& name) {
+    try {
+        json body = {{"model", name}};
+        auto resp = http_.post(router_url_ + "/unload", body, 30000, {}, abort_);
+        return resp.body.value("success", false);
+    } catch (...) {
+        return false;
+    }
+}
+
 LLMClient::ChatResult LLMClient::chat(const json& messages, const json& tools,
                                        const std::string& model) {
     json body = {
@@ -46,7 +94,7 @@ LLMClient::ChatResult LLMClient::chat(const json& messages, const json& tools,
     }
 
     auto start = std::chrono::steady_clock::now();
-    auto result = http_.post(chat_url_, body, 120000, {});
+    auto result = http_.post(chat_url_, body, 120000, {}, abort_);
     auto end = std::chrono::steady_clock::now();
 
     auto& resp = result.body;
@@ -192,7 +240,7 @@ LLMClient::ChatResult LLMClient::chat_stream(const json& messages, TokenCallback
                     } catch (...) {}
                 }
             }
-        });
+        }, 120000, {}, abort_);
 
     auto end = std::chrono::steady_clock::now();
 

@@ -33,11 +33,21 @@ public:
         int max_context = 0;
     };
 
+    struct ModelStatus {
+        std::string id;
+        std::string status;
+    };
+
     using TokenCallback = std::function<void(const std::string& token, bool is_reasoning)>;
+    using AbortCheck = http::HttpClient::AbortCheck;
 
     LLMClient(std::string base_url, const http::HttpClient& http);
+    void set_abort_check(AbortCheck check);
 
     ModelInfo fetch_model_info();
+    std::vector<std::string> fetch_models();
+    std::vector<ModelStatus> fetch_models_with_status();
+    bool unload_model(const std::string& name);
     ChatResult chat(const json& messages, const json& tools = json(), const std::string& model = "default");
     ChatResult chat_stream(const json& messages, TokenCallback on_token,
                            const json& tools = json(), const std::string& model = "default");
@@ -45,7 +55,9 @@ public:
 private:
     std::string chat_url_;
     std::string models_url_;
+    std::string router_url_;
     const http::HttpClient& http_;
+    AbortCheck abort_;
 };
 
 } // namespace llm

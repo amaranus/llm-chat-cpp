@@ -18,6 +18,7 @@ public:
     };
 
     using StreamCallback = std::function<void(const std::string& chunk)>;
+    using AbortCheck = std::function<bool()>;
 
     HttpClient();
     ~HttpClient();
@@ -30,14 +31,17 @@ public:
 
     Result post(const std::string& url, const json& body,
                 long timeout_ms = 30000,
-                const std::vector<std::string>& extra_headers = {}) const;
+                const std::vector<std::string>& extra_headers = {},
+                AbortCheck abort = nullptr) const;
 
     void post_stream(const std::string& url, const json& body,
                      StreamCallback on_chunk,
                      long timeout_ms = 120000,
-                     const std::vector<std::string>& extra_headers = {}) const;
+                     const std::vector<std::string>& extra_headers = {},
+                     AbortCheck abort = nullptr) const;
 
-    json get(const std::string& url, long timeout_ms = 10000) const;
+    json get(const std::string& url, long timeout_ms = 10000,
+             AbortCheck abort = nullptr) const;
 
 private:
     class Impl;

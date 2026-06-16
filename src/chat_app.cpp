@@ -224,7 +224,8 @@ llm::LLMClient::json ChatApp::build_user_message(const std::string& text) {
 }
 
 bool ChatApp::handle_command(const std::string& input, json& messages,
-                             const std::vector<mcp::MCPTool>& tools) {
+                             const std::vector<mcp::MCPTool>& tools,
+                             llm::LLMClient& llm) {
     if (input == "/quit" || input == "/exit") {
         std::cout << "Bye.\n";
         return false;
@@ -277,6 +278,57 @@ bool ChatApp::handle_command(const std::string& input, json& messages,
         }
         return true;
     }
+    if (input == "/models") {
+        auto models = llm.fetch_models_with_status();
+        if (models.empty()) {
+            std::cout << utils::color("No models found.\n", 33);
+            return true;
+        }
+        std::cout << utils::color("Router Models:\n", 90);
+        for (size_t i = 0; i < models.size(); ++i) {
+            std::cout << "  " << utils::color(std::to_string(i + 1), 33) << ". " << models[i].id;
+            if (models[i].status == "loaded") {
+                std::cout << utils::color(" (loaded", 32) << utils::color(" ✓)", 32);
+                if (models[i].id == selected_model_) {
+                    std::cout << utils::color(" ← current", 36);
+                }
+            } else if (models[i].status == "loading") {
+                std::cout << utils::color(" (loading...)", 33);
+            } else {
+                std::cout << utils::color(" (unloaded)", 90);
+            }
+            std::cout << "\n";
+        }
+        std::cout << "  " << utils::color(std::to_string(models.size() + 1), 31) << ". "
+                  << utils::color("Unload all models", 31) << "\n";
+        std::cout << utils::color("Select [1-" + std::to_string(models.size() + 1)
+                                  + "]: ", 36);
+        std::cout.flush();
+
+        std::string line;
+        std::getline(std::cin, line);
+        if (!line.empty()) {
+            try {
+                int idx = std::stoi(line);
+                if (idx >= 1 && idx <= static_cast<int>(models.size())) {
+                    selected_model_ = models[idx - 1].id;
+                    std::cout << utils::color("Switched to: ", 32) << selected_model_ << "\n";
+                } else if (idx == static_cast<int>(models.size() + 1)) {
+                    for (const auto& m : models) {
+                        if (m.status == "loaded") {
+                            if (llm.unload_model(m.id)) {
+                                std::cout << utils::color("Unloaded: ", 33) << m.id << "\n";
+                            } else {
+                                std::cout << utils::color("Failed: ", 31) << m.id << "\n";
+                            }
+                        }
+                    }
+                    selected_model_.clear();
+                }
+            } catch (...) {}
+        }
+        return true;
+    }
     return true;
 }
 
@@ -290,12 +342,51 @@ void ChatApp::run() {
     http::HttpClient http;
     mcp::MCPClient mcp(mcp_url_, http);
     llm::LLMClient llm(llm_url_, http);
+    llm.set_abort_check([&]() { return !g_running; });
 
     {
         auto info = llm.fetch_model_info();
         if (info.max_context > 0) {
             max_context_ = info.max_context;
+        }
+        std::cout << utils::color("Server: ", 90) << llm_url_ << "\n";
+
+        auto models = llm.fetch_models();
+        if (models.empty()) {
+            selected_model_ = "default";
             std::cout << utils::color("Model: ", 90) << info.name
+                      << utils::color(", context: ", 90) << max_context_ << "\n";
+        } else {
+            std::cout << utils::color("Models:\n", 90);
+            for (size_t i = 0; i < models.size(); ++i) {
+                std::cout << "  " << utils::color(std::to_string(i + 1), 33)
+                          << ". " << models[i];
+                if (models[i] == info.name) {
+                    std::cout << utils::color(" (current)", 90);
+                }
+                if (info.max_context > 0 && models[i] == info.name) {
+                    std::cout << utils::color(" [ctx: " + std::to_string(max_context_) + "]", 32);
+                }
+                std::cout << "\n";
+            }
+            std::cout << utils::color("Select model [1-" + std::to_string(models.size()) + "]: ", 36);
+            std::cout.flush();
+
+            std::string input;
+            std::getline(std::cin, input);
+            if (!input.empty()) {
+                try {
+                    int idx = std::stoi(input);
+                    if (idx >= 1 && idx <= static_cast<int>(models.size())) {
+                        selected_model_ = models[idx - 1];
+                    }
+                } catch (...) {}
+            }
+
+            if (selected_model_.empty()) {
+                selected_model_ = models[0];
+            }
+            std::cout << utils::color("Using: ", 32) << selected_model_
                       << utils::color(", context: ", 90) << max_context_ << "\n";
         }
     }
@@ -360,7 +451,7 @@ void ChatApp::run() {
         add_history(input.c_str());
 
         if (input[0] == '/') {
-            bool handled = handle_command(input, messages, tools);
+            bool handled = handle_command(input, messages, tools, llm);
             if (handled) continue;
             break;
         }
@@ -372,16 +463,17 @@ void ChatApp::run() {
         const int max_tool_calls = 20;
 
         while (tool_loop && g_running && tool_call_count < max_tool_calls) {
-            try {
-                std::string full_content;
-                bool stream_started = false;
-                bool is_reasoning = false;
+            std::string full_content;
+            bool stream_started = false;
+            bool is_reasoning = false;
+            std::atomic<bool> thinking_done{false};
+            std::thread thinking_thread;
 
-                std::atomic<bool> thinking_done{false};
-                std::thread thinking_thread([&]() {
+            try {
+                thinking_thread = std::thread([&]() {
                     const char spinner[] = "|/-\\";
                     int i = 0;
-                    while (!thinking_done) {
+                    while (!thinking_done && g_running) {
                         {
                             std::lock_guard<std::mutex> lock(g_print_mutex);
                             std::cout << "\r" << utils::color(std::string(" ") + spinner[i % 4] + " Thinking...", 90) << std::flush;
@@ -430,7 +522,8 @@ void ChatApp::run() {
                             full_content += token;
                         }
                     },
-                    openai_tools);
+                    openai_tools,
+                    selected_model_);
 
                 if (!stream_started) {
                     thinking_done = true;
@@ -520,6 +613,10 @@ void ChatApp::run() {
                 }
 
             } catch (const std::exception& e) {
+                thinking_done = true;
+                if (thinking_thread.joinable()) thinking_thread.join();
+                std::lock_guard<std::mutex> lock(g_print_mutex);
+                std::cout << "\r" << std::string(utils::get_terminal_width(), ' ') << "\r" << std::flush;
                 std::cout << utils::color(utils::bold("ERROR: "), 31) << e.what() << "\n";
                 break;
             }
@@ -549,6 +646,7 @@ void ChatApp::print_help() {
     std::cout << "  " << utils::color("/files", 33) << " — List attached files\n";
     std::cout << "  " << utils::color("/remove <path>", 33) << " — Remove attached file\n";
     std::cout << "  " << utils::color("/clearfiles", 33) << " — Remove all attached files\n";
+    std::cout << "  " << utils::color("/models", 33) << " — List / switch / unload models\n";
     std::cout << utils::color(std::string(utils::get_terminal_width(), '-'), 90) << "\n";
 }
 

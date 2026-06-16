@@ -28,7 +28,8 @@ private:
 
     bool handle_command(const std::string& input,
                         json& messages,
-                        const std::vector<mcp::MCPTool>& tools);
+                        const std::vector<mcp::MCPTool>& tools,
+                        llm::LLMClient& llm);
     void add_file(const std::string& path);
     void remove_file(const std::string& path);
     void list_files();
@@ -39,5 +40,6 @@ private:
     std::string llm_url_;
     std::string mcp_url_;
     int max_context_;
+    std::string selected_model_ = "default";
     std::vector<FileAttachment> files_;
 };

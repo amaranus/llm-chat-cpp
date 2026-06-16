@@ -45,6 +45,11 @@ public:
         return headers;
     }
 
+    static int xfer_callback(void* clientp, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
+        auto* abort = static_cast<AbortCheck*>(clientp);
+        return (abort && *abort && (*abort)()) ? 1 : 0;
+    }
+
     static void set_common_opts(CURL* curl, const std::string& url,
                                 const std::string& body_str,
                                 struct curl_slist* headers,
@@ -55,6 +60,14 @@ public:
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
         curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, timeout_ms);
         curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, 5000);
+    }
+
+    static void set_abort_opts(CURL* curl, AbortCheck& abort) {
+        if (abort) {
+            curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, xfer_callback);
+            curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &abort);
+            curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+        }
     }
 
     static void check_error(CURLcode res, long http_code, const std::string& response_body,
@@ -73,7 +86,8 @@ HttpClient::~HttpClient() = default;
 
 HttpClient::Result HttpClient::post(const std::string& url, const json& body,
                                     long timeout_ms,
-                                    const std::vector<std::string>& extra_headers) const {
+                                    const std::vector<std::string>& extra_headers,
+                                    AbortCheck abort) const {
     std::string body_str = body.dump();
     std::string response_body;
     std::vector<std::string> resp_headers;
@@ -83,6 +97,7 @@ HttpClient::Result HttpClient::post(const std::string& url, const json& body,
 
     auto* headers = Impl::setup_headers(extra_headers, "application/json");
     Impl::set_common_opts(curl, url, body_str, headers, timeout_ms);
+    Impl::set_abort_opts(curl, abort);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, Impl::write_body);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_body);
     curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, Impl::write_header);
@@ -101,7 +116,8 @@ HttpClient::Result HttpClient::post(const std::string& url, const json& body,
 void HttpClient::post_stream(const std::string& url, const json& body,
                              StreamCallback on_chunk,
                              long timeout_ms,
-                             const std::vector<std::string>& extra_headers) const {
+                             const std::vector<std::string>& extra_headers,
+                             AbortCheck abort) const {
     std::string body_str = body.dump();
 
     auto* curl = curl_easy_init();
@@ -109,6 +125,7 @@ void HttpClient::post_stream(const std::string& url, const json& body,
 
     auto* headers = Impl::setup_headers(extra_headers, "text/event-stream");
     Impl::set_common_opts(curl, url, body_str, headers, timeout_ms);
+    Impl::set_abort_opts(curl, abort);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, Impl::write_body_stream);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &on_chunk);
 
@@ -121,7 +138,8 @@ void HttpClient::post_stream(const std::string& url, const json& body,
     }
 }
 
-HttpClient::json HttpClient::get(const std::string& url, long timeout_ms) const {
+HttpClient::json HttpClient::get(const std::string& url, long timeout_ms,
+                                  AbortCheck abort) const {
     std::string response_body;
 
     auto* curl = curl_easy_init();
@@ -130,6 +148,7 @@ HttpClient::json HttpClient::get(const std::string& url, long timeout_ms) const 
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
     curl_easy_setopt(curl, CURLOPT_HTTPGET, 1L);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, Impl::write_body);
+    Impl::set_abort_opts(curl, abort);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_body);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, timeout_ms);
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, 5000);
