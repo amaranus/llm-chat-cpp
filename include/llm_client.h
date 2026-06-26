@@ -36,6 +36,7 @@ public:
     struct ModelStatus {
         std::string id;
         std::string status;
+        int max_context = 0;
     };
 
     using TokenCallback = std::function<void(const std::string& token, bool is_reasoning)>;
@@ -45,7 +46,7 @@ public:
     void set_abort_check(AbortCheck check);
 
     ModelInfo fetch_model_info();
-    std::vector<std::string> fetch_models();
+
     std::vector<ModelStatus> fetch_models_with_status();
     bool unload_model(const std::string& name);
     ChatResult chat(const json& messages, const json& tools = json(), const std::string& model = "default");

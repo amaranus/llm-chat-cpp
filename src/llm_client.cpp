@@ -36,21 +36,6 @@ LLMClient::ModelInfo LLMClient::fetch_model_info() {
     return info;
 }
 
-std::vector<std::string> LLMClient::fetch_models() {
-    std::vector<std::string> models;
-    try {
-        auto resp = http_.get(models_url_, 5000, abort_);
-        auto& data = resp["data"];
-        for (auto& m : data) {
-            std::string id = m.value("id", "");
-            if (!id.empty()) {
-                models.push_back(std::move(id));
-            }
-        }
-    } catch (...) {}
-    return models;
-}
-
 std::vector<LLMClient::ModelStatus> LLMClient::fetch_models_with_status() {
     std::vector<ModelStatus> models;
     try {
@@ -62,6 +47,23 @@ std::vector<LLMClient::ModelStatus> LLMClient::fetch_models_with_status() {
             if (ms.id.empty()) continue;
             if (m.contains("status") && m["status"].contains("value")) {
                 ms.status = m["status"]["value"].get<std::string>();
+                auto& args = m["status"]["args"];
+                if (args.is_array()) {
+                    for (const auto& arg : args) {
+                        std::string s = arg.get<std::string>();
+                        if (s == "-ctx" || s == "--ctx-size" || s == "-c") {
+                            ms.max_context = 0;
+                        } else if (ms.max_context == 0) {
+                            try { ms.max_context = std::stoi(s); } catch (...) {}
+                        }
+                    }
+                }
+            }
+            if (ms.max_context == 0 && m.contains("meta") && m["meta"].contains("n_ctx")) {
+                ms.max_context = m["meta"].value("n_ctx", 0);
+            }
+            if (ms.max_context == 0 && m.contains("meta") && m["meta"].contains("n_ctx_train")) {
+                ms.max_context = m["meta"].value("n_ctx_train", 0);
             }
             models.push_back(std::move(ms));
         }
