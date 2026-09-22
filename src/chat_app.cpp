@@ -95,7 +95,12 @@ static std::string read_file_text(const std::string& path) {
 }
 
 ChatApp::ChatApp(std::string llm_url, std::string mcp_url, int max_context)
-    : llm_url_(std::move(llm_url)), mcp_url_(std::move(mcp_url)), max_context_(max_context) {}
+    : llm_url_(std::move(llm_url)), mcp_url_(std::move(mcp_url)), max_context_(max_context),
+      mcp_client_(std::make_unique<mcp::MCPClient>(mcp_url_, http_)) {}
+
+ChatApp::ChatApp(std::string llm_url, std::string mcp_url, const std::vector<mcp::MCPServerConfig>& mcp_configs, int max_context)
+    : llm_url_(std::move(llm_url)), mcp_url_(std::move(mcp_url)), max_context_(max_context),
+      mcp_configs_(mcp_configs), mcp_client_(std::make_unique<mcp::MCPClient>(mcp_url_, http_)) {}
 
 void ChatApp::add_file(const std::string& path) {
     fs::file_status status;
@@ -222,8 +227,54 @@ llm::LLMClient::json ChatApp::build_user_message(const std::string& text) {
     return {{"role", "user"}, {"content", content}};
 }
 
+bool ChatApp::try_connect_mcp() {
+    if (mcp_url_.empty()) {
+        for (const auto& cfg : mcp_configs_) {
+            if (!cfg.url.empty()) {
+                mcp_url_ = cfg.url;
+                mcp_client_->set_url(cfg.url);
+                break;
+            }
+        }
+    }
+
+    if (mcp_url_.empty()) {
+        return false;
+    }
+
+    try {
+        auto init_resp = mcp_client_->initialize();
+        std::string sid = mcp_client_->session_id();
+        if (!sid.empty()) {
+            mcp_available_ = true;
+            return true;
+        }
+    } catch (...) {}
+
+    mcp_available_ = false;
+    return false;
+}
+
+void ChatApp::show_mcp_status() {
+    if (mcp_available_) {
+        std::cout << utils::color("MCP Status: ", 32) << utils::color("Connected", 32) << "\n";
+        std::cout << "  URL: " << mcp_url_ << "\n";
+    } else {
+        std::cout << utils::color("MCP Status: ", 33) << utils::color("Disconnected", 33) << "\n";
+        if (!mcp_url_.empty()) {
+            std::cout << "  Last URL: " << mcp_url_ << "\n";
+        }
+        if (!mcp_configs_.empty()) {
+            std::cout << "  Available servers:\n";
+            for (const auto& cfg : mcp_configs_) {
+                std::cout << "    - " << utils::color(cfg.name, 36) << ": " << cfg.url << "\n";
+            }
+        }
+    }
+}
+
 bool ChatApp::handle_command(const std::string& input, json& messages,
-                             const std::vector<mcp::MCPTool>& tools,
+                             std::vector<mcp::MCPTool>& tools,
                              llm::LLMClient& llm) {
     if (input == "/quit" || input == "/exit") {
         std::cout << "Bye.\n";
@@ -236,6 +287,79 @@ bool ChatApp::handle_command(const std::string& input, json& messages,
     if (input == "/clear") {
         messages = llm::LLMClient::json::array();
         std::cout << "Chat history cleared.\n";
+        return true;
+    }
+    if (input == "/mcp" || input == "/mcp status") {
+        show_mcp_status();
+        return true;
+    }
+    if (input == "/mcp connect") {
+        std::cout << "Attempting MCP connection...\n";
+        if (!mcp_configs_.empty()) {
+            for (const auto& cfg : mcp_configs_) {
+                if (!cfg.url.empty()) {
+                    std::cout << "  Trying " << cfg.name << ": " << cfg.url << " ... ";
+                    std::cout.flush();
+                    mcp_client_->set_url(cfg.url);
+                    mcp_client_->disconnect();
+                    try {
+                        mcp_client_->initialize();
+                        std::string sid = mcp_client_->session_id();
+                        std::cout << utils::color("ok", 32);
+                        if (!sid.empty()) {
+                            std::cout << " (session: " << sid.substr(0, 16) << "...)";
+                        }
+                        std::cout << "\n";
+                        mcp_available_ = true;
+                        mcp_url_ = cfg.url;
+                        tools = mcp_client_->list_tools();
+                        std::cout << "MCP tools (" << tools.size() << "): ";
+                        for (size_t i = 0; i < tools.size(); ++i) {
+                            if (i > 0) std::cout << ", ";
+                            std::cout << utils::color(tools[i].name, 36);
+                        }
+                        std::cout << "\n";
+                        return true;
+                    } catch (const std::exception& e) {
+                        std::cout << utils::color("failed", 31) << " (" << e.what() << ")\n";
+                    }
+                }
+            }
+        } else if (!mcp_url_.empty()) {
+            std::cout << "  Trying " << mcp_url_ << " ... ";
+            std::cout.flush();
+            mcp_client_->disconnect();
+            try {
+                mcp_client_->initialize();
+                std::string sid = mcp_client_->session_id();
+                std::cout << utils::color("ok", 32);
+                if (!sid.empty()) {
+                    std::cout << " (session: " << sid.substr(0, 16) << "...)";
+                }
+                std::cout << "\n";
+                mcp_available_ = true;
+                tools = mcp_client_->list_tools();
+                std::cout << "MCP tools (" << tools.size() << "): ";
+                for (size_t i = 0; i < tools.size(); ++i) {
+                    if (i > 0) std::cout << ", ";
+                    std::cout << utils::color(tools[i].name, 36);
+                }
+                std::cout << "\n";
+                return true;
+            } catch (const std::exception& e) {
+                std::cout << utils::color("failed", 31) << " (" << e.what() << ")\n";
+            }
+        } else {
+            std::cout << utils::color("No MCP server configured. Create mcp.json in the exe directory.\n", 33);
+        }
+        mcp_available_ = false;
+        return true;
+    }
+    if (input == "/mcp disconnect") {
+        mcp_client_->disconnect();
+        mcp_available_ = false;
+        tools.clear();
+        std::cout << utils::color("MCP disconnected.\n", 33);
         return true;
     }
     if (input == "/tools") {
@@ -341,9 +465,7 @@ void ChatApp::run() {
     print_logo();
     std::cout << "\n";
 
-    http::HttpClient http;
-    mcp::MCPClient mcp(mcp_url_, http);
-    llm::LLMClient llm(llm_url_, http);
+    llm::LLMClient llm(llm_url_, http_);
     llm.set_abort_check([&]() { return !g_running; });
 
     {
@@ -404,28 +526,40 @@ void ChatApp::run() {
     std::cout << "Connecting to MCP: " << mcp_url_ << " ... ";
     std::cout.flush();
     try {
-        auto init_resp = mcp.initialize();
-        std::string sid = mcp.session_id();
+        auto init_resp = mcp_client_->initialize();
+        std::string sid = mcp_client_->session_id();
         std::cout << utils::color("ok", 32);
         if (!sid.empty()) {
             std::cout << " (session: " << sid.substr(0, 16) << "...)";
         }
         std::cout << "\n";
+        mcp_available_ = true;
     } catch (const std::exception& e) {
         std::cout << utils::color("failed", 31) << " (" << e.what() << ")\n";
+        std::cout << utils::color("Continuing without MCP tools. Use /mcp to reconnect.\n", 33);
+        mcp_available_ = false;
     }
 
     std::vector<mcp::MCPTool> tools;
-    try {
-        tools = mcp.list_tools();
-        std::cout << "MCP tools (" << tools.size() << "): ";
-        for (size_t i = 0; i < tools.size(); ++i) {
-            if (i > 0) std::cout << ", ";
-            std::cout << utils::color(tools[i].name, 36);
+    if (mcp_available_) {
+        try {
+            tools = mcp_client_->list_tools();
+            std::cout << "MCP tools (" << tools.size() << "): ";
+            for (size_t i = 0; i < tools.size(); ++i) {
+                if (i > 0) std::cout << ", ";
+                std::cout << utils::color(tools[i].name, 36);
+            }
+            std::cout << "\n";
+        } catch (const std::exception& e) {
+            std::cout << utils::color("Failed to list tools: ", 33) << e.what() << "\n";
         }
-        std::cout << "\n";
-    } catch (const std::exception& e) {
-        std::cout << utils::color("Failed to list tools: ", 33) << e.what() << "\n";
+    } else {
+        if (!mcp_configs_.empty()) {
+            std::cout << utils::color("Available MCP servers (use /mcp to connect):\n", 90);
+            for (const auto& cfg : mcp_configs_) {
+                std::cout << "  - " << utils::color(cfg.name, 36) << ": " << cfg.url << "\n";
+            }
+        }
     }
 
     std::cout << utils::color(std::string(utils::get_terminal_width(), '-'), 90) << "\n";
@@ -585,7 +719,7 @@ void ChatApp::run() {
 
                         llm::LLMClient::json mcp_result;
                         try {
-                            mcp_result = mcp.call_tool(tool_name, tool_args);
+                            mcp_result = mcp_client_->call_tool(tool_name, tool_args);
                         } catch (const std::exception& e) {
                             mcp_result = {
                                 {"result", {
@@ -651,6 +785,7 @@ void ChatApp::print_help() {
     std::cout << "  " << utils::color("/quit", 33) << " or " << utils::color("/exit", 33) << " — Exit\n";
     std::cout << "  " << utils::color("/help", 33) << " — Show this help\n";
     std::cout << "  " << utils::color("/tools", 33) << " — List MCP tools\n";
+    std::cout << "  " << utils::color("/mcp", 33) << " — MCP status / connect / disconnect\n";
     std::cout << "  " << utils::color("/clear", 33) << " — Clear chat history\n";
     std::cout << "  " << utils::color("/read <path>", 33) << " — Add file to context (text, image, pdf)\n";
     std::cout << "  " << utils::color("/files", 33) << " — List attached files\n";

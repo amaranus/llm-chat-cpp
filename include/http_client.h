@@ -34,6 +34,17 @@ public:
                 const std::vector<std::string>& extra_headers = {},
                 AbortCheck abort = nullptr) const;
 
+    struct RawResult {
+        std::string body;
+        std::vector<std::string> response_headers;
+        long http_code;
+    };
+
+    RawResult post_raw(const std::string& url, const json& body,
+                       long timeout_ms = 30000,
+                       const std::vector<std::string>& extra_headers = {},
+                       AbortCheck abort = nullptr) const;
+
     void post_stream(const std::string& url, const json& body,
                      StreamCallback on_chunk,
                      long timeout_ms = 120000,

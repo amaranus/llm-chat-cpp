@@ -20,6 +20,10 @@ public:
     std::vector<MCPTool> list_tools();
     http::HttpClient::json call_tool(const std::string& name, const http::HttpClient::json& arguments);
     const std::string& session_id() const;
+    bool is_connected() const;
+    void disconnect();
+    void set_url(const std::string& url);
+    const std::string& url() const;
 
 private:
     std::string base_url_;

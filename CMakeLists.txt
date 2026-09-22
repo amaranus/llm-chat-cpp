@@ -20,6 +20,7 @@ set(SOURCES
     src/utils.cpp
     src/http_client.cpp
     src/mcp_client.cpp
+    src/mcp_config.cpp
     src/llm_client.cpp
     src/chat_app.cpp
 )

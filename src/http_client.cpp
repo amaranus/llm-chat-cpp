@@ -88,6 +88,14 @@ HttpClient::Result HttpClient::post(const std::string& url, const json& body,
                                     long timeout_ms,
                                     const std::vector<std::string>& extra_headers,
                                     AbortCheck abort) const {
+    auto raw = post_raw(url, body, timeout_ms, extra_headers, abort);
+    return {json::parse(raw.body), raw.response_headers, raw.http_code};
+}
+
+HttpClient::RawResult HttpClient::post_raw(const std::string& url, const json& body,
+                                           long timeout_ms,
+                                           const std::vector<std::string>& extra_headers,
+                                           AbortCheck abort) const {
     std::string body_str = body.dump();
     std::string response_body;
     std::vector<std::string> resp_headers;
@@ -95,7 +103,7 @@ HttpClient::Result HttpClient::post(const std::string& url, const json& body,
     auto* curl = curl_easy_init();
     if (!curl) throw std::runtime_error("curl_easy_init failed");
 
-    auto* headers = Impl::setup_headers(extra_headers, "application/json");
+    auto* headers = Impl::setup_headers(extra_headers, "application/json, text/event-stream");
     Impl::set_common_opts(curl, url, body_str, headers, timeout_ms);
     Impl::set_abort_opts(curl, abort);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, Impl::write_body);
@@ -109,8 +117,13 @@ HttpClient::Result HttpClient::post(const std::string& url, const json& body,
     curl_slist_free_all(headers);
     curl_easy_cleanup(curl);
 
-    Impl::check_error(res, http_code, response_body, "HTTP POST");
-    return {json::parse(response_body), resp_headers, http_code};
+    if (res != CURLE_OK) {
+        throw std::runtime_error("HTTP POST failed: " + std::string(curl_easy_strerror(res)));
+    }
+    if (http_code < 200 || http_code >= 300) {
+        throw std::runtime_error("HTTP error " + std::to_string(http_code) + ": " + response_body);
+    }
+    return {response_body, resp_headers, http_code};
 }
 
 void HttpClient::post_stream(const std::string& url, const json& body,
