@@ -8,7 +8,7 @@ find_package(Threads REQUIRED)
 
 if(WIN32)
     find_package(CURL REQUIRED)
-    add_compile_options(/utf-8)
+    add_compile_options(/utf-8 /DUNICODE /D_UNICODE)
 else()
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(CURL REQUIRED libcurl)
@@ -21,6 +21,7 @@ set(SOURCES
     src/http_client.cpp
     src/mcp_client.cpp
     src/mcp_config.cpp
+    src/completion.cpp
     src/llm_client.cpp
     src/chat_app.cpp
 )

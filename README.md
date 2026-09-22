@@ -59,17 +59,44 @@ Binary: `build\Release\llm-chat.exe`
 llama-server -m <model.gguf> --port 8080
 ```
 
-### 2. Start MCP server
+### 2. Configure MCP Server
 
-```bash
-# example with server.py
-uv run server.py
+Create a `mcp.json` file in the same directory as the binary (or working directory):
+
+```json
+{
+  "mcpServers": {
+    "exa-search": {
+      "type": "http",
+      "url": "https://mcp.exa.ai/mcp"
+    },
+    "local-tools": {
+      "type": "http",
+      "url": "http://localhost:8000/mcp"
+    }
+  }
+}
 ```
 
 ### 3. Run llm-chat
 
 ```bash
 ./build/llm-chat
+```
+
+If MCP connection fails at startup, the app continues without tools. Use `/mcp connect` later to retry.
+
+## Command Line Options
+
+| Option | Description |
+|---|---|
+| `--llm-url URL` | llama.cpp server address |
+| `--mcp-url URL` | MCP server address (overrides mcp.json) |
+| `--mcp-config PATH` | Path to mcp.json configuration file |
+| `--help` | Show usage |
+
+```bash
+./build/llm-chat --llm-url http://10.0.0.1:8080 --mcp-config ./mcp.json
 ```
 
 ## Environment Variables
@@ -97,28 +124,65 @@ export LLM_CHAT_MAX_CONTEXT=4096
 | `/help` | Show command list |
 | `/clear` | Clear chat history |
 | `/tools` | List MCP tools |
+| `/mcp` | Show MCP connection status |
+| `/mcp connect` | Connect to MCP server |
+| `/mcp disconnect` | Disconnect from MCP server |
 | `/read` | Add file to context |
 | `/files` | List attached files |
 | `/remove` | Remove attached file |
 | `/clearfiles` | Remove all attached files |
 | `/models` | List / switch / unload models |
 
-
 ## Architecture
 
 ```
 ┌─────────────┐      ┌──────────────┐      ┌──────────────┐
 │  llm-chat   │─────▶│  llama.cpp   │      │  MCP Server  │
-│  (C++ CLI)  │      │  :8080       │      │  :8000/mcp   │
+│  (C++ CLI)  │      │  :8080       │      │  (HTTP)      │
 │             │      │  /v1/chat/   │      │  JSON-RPC    │
 │             │      │  completions │      │  tools/list  │
 │             │      └──────────────┘      │  tools/call  │
 │             │                           └──────────────┘
+│             │ mcp.json                   Supports SSE
+│             │ auto-discovery             and JSON
 └─────────────┘
 ```
 
-1. User message → llama.cpp API (with tool definitions)
-2. If model returns `tool_calls` → execute via MCP
-3. Tool result sent back to model
-4. Model final response displayed to user
-5. Stats shown after each response (tokens, time, t/s, context %)
+1. App searches for `mcp.json` in exe dir, then working dir
+2. User message → llama.cpp API (with tool definitions)
+3. If model returns `tool_calls` → execute via MCP
+4. Tool result sent back to model
+5. Model final response displayed to user
+6. Stats shown after each response (tokens, time, t/s, context %)
+
+## MCP Configuration
+
+The app reads `mcp.json` from (in order):
+1. Same directory as the executable
+2. Current working directory
+
+You can also specify a custom path with `--mcp-config`.
+
+### Standard mcp.json Format
+
+```json
+{
+  "mcpServers": {
+    "server-name": {
+      "type": "http",
+      "url": "https://example.com/mcp",
+      "headers": {
+        "Authorization": "Bearer token"
+      },
+      "enabled": true
+    }
+  }
+}
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `type` | Yes | Must be `"http"` |
+| `url` | Yes | MCP server endpoint URL |
+| `headers` | No | Additional HTTP headers |
+| `enabled` | No | Set `false` to skip (default: `true`) |

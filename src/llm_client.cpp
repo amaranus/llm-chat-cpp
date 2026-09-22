@@ -49,12 +49,23 @@ std::vector<LLMClient::ModelStatus> LLMClient::fetch_models_with_status() {
                 ms.status = m["status"]["value"].get<std::string>();
                 auto& args = m["status"]["args"];
                 if (args.is_array()) {
-                    for (const auto& arg : args) {
-                        std::string s = arg.get<std::string>();
-                        if (s == "-ctx" || s == "--ctx-size" || s == "-c") {
-                            ms.max_context = 0;
-                        } else if (ms.max_context == 0) {
-                            try { ms.max_context = std::stoi(s); } catch (...) {}
+                    for (size_t i = 0; i < args.size(); ++i) {
+                        std::string s = args[i].get<std::string>();
+                        if ((s == "-ctx" || s == "--ctx-size") && i + 1 < args.size()) {
+                            try { ms.max_context = std::stoi(args[i + 1].get<std::string>()); } catch (...) {}
+                            i++;
+                        }
+                    }
+                }
+                if (ms.max_context == 0) {
+                    if (m.contains("preset")) {
+                        std::string preset = m["preset"].get<std::string>();
+                        size_t pos = preset.find("ctx-size = ");
+                        if (pos != std::string::npos) {
+                            size_t start = pos + 11;
+                            size_t end = preset.find_first_of("\n\r", start);
+                            std::string val = preset.substr(start, end - start);
+                            try { ms.max_context = std::stoi(val); } catch (...) {}
                         }
                     }
                 }

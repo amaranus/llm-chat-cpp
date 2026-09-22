@@ -7,6 +7,8 @@
 
 #ifdef _WIN32
 
+#include <windows.h>
+
 char* readline(const char* prompt);
 void add_history(const char* line);
 

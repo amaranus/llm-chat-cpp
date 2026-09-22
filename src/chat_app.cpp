@@ -1,5 +1,6 @@
 #include "chat_app.h"
 #include "utils.h"
+#include "completion.h"
 #include <iostream>
 #include <atomic>
 #include <thread>
@@ -438,7 +439,11 @@ bool ChatApp::handle_command(const std::string& input, json& messages,
                 int idx = std::stoi(line);
                 if (idx >= 1 && idx <= static_cast<int>(models.size())) {
                     selected_model_ = models[idx - 1].id;
-                    std::cout << utils::color("Switched to: ", 32) << selected_model_ << "\n";
+                    if (models[idx - 1].max_context > 0) {
+                        max_context_ = models[idx - 1].max_context;
+                    }
+                    std::cout << utils::color("Switched to: ", 32) << selected_model_
+                              << utils::color(", context: ", 90) << max_context_ << "\n";
                 } else if (idx == static_cast<int>(models.size() + 1)) {
                     for (const auto& m : models) {
                         if (m.status == "loaded") {
@@ -461,6 +466,8 @@ bool ChatApp::handle_command(const std::string& input, json& messages,
 void ChatApp::run() {
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
+
+    completion::setup();
 
     print_logo();
     std::cout << "\n";
@@ -485,8 +492,15 @@ void ChatApp::run() {
             for (size_t i = 0; i < models.size(); ++i) {
                 std::cout << "  " << utils::color(std::to_string(i + 1), 33)
                           << ". " << models[i].id;
-                if (models[i].id == info.name) {
-                    std::cout << utils::color(" (current)", 90);
+                if (models[i].status == "loaded") {
+                    std::cout << utils::color(" (loaded", 32) << utils::color(" ✓)", 32);
+                    if (models[i].id == info.name) {
+                        std::cout << utils::color(" ← current", 36);
+                    }
+                } else if (models[i].status == "loading") {
+                    std::cout << utils::color(" (loading...)", 33);
+                } else {
+                    std::cout << utils::color(" (unloaded)", 90);
                 }
                 int ctx = models[i].max_context > 0 ? models[i].max_context : max_context_;
                 if (ctx > 0) {
@@ -513,8 +527,10 @@ void ChatApp::run() {
             }
 
             for (const auto& m : models) {
-                if (m.id == selected_model_ && m.max_context > 0) {
-                    max_context_ = m.max_context;
+                if (m.id == selected_model_) {
+                    if (m.max_context > 0) {
+                        max_context_ = m.max_context;
+                    }
                     break;
                 }
             }
